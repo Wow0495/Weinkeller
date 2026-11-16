@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Weinkeller-Backup",
+  "description": "Format der JSON-Backup-Datei (schemaVersion 2). Menge wird nicht gespeichert, sondern aus movements berechnet. Ältere Dateien (Version 1) werden beim Import automatisch migriert.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "wines",
+    "locations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "app": {
+      "const": "weinkeller"
+    },
+    "exportedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "lastBackupAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "theme": {
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ]
+        }
+      }
+    },
+    "locations": {
+      "description": "Lager (z. B. Keller) mit Zonen/Regalen als Raster",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "zones"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "zones": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "rows",
+                "cols"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rows": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50
+                },
+                "cols": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "wines": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/wine"
+      }
+    }
+  },
+  "$defs": {
+    "year": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1800,
+      "maximum": 2200
+    },
+    "wine": {
+      "type": "object",
+      "required": [
+        "id",
+        "createdAt",
+        "updatedAt",
+        "name",
+        "producer",
+        "vintage",
+        "type",
+        "movements",
+        "placements",
+        "origin"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name / Cuvée"
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Weingut / Produzent"
+        },
+        "vintage": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1800
+            },
+            {
+              "const": "NV"
+            }
+          ]
+        },
+        "type": {
+          "enum": [
+            "rot",
+            "weiss",
+            "rose",
+            "schaum",
+            "suess",
+            "likoer"
+          ]
+        },
+        "grapes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "country": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "appellation": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string"
+        },
+        "bottleSize": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Liter, z. B. 0.75"
+        },
+        "abv": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 25
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "locationId",
+              "zoneId",
+              "count"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "locationId": {
+                "type": "string"
+              },
+              "zoneId": {
+                "type": "string"
+              },
+              "row": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "col": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "movements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "date",
+              "kind",
+              "qty"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string",
+                "format": "date"
+              },
+              "kind": {
+                "enum": [
+                  "kauf",
+                  "getrunken",
+                  "verschenkt",
+                  "verdorben",
+                  "korrektur"
+                ]
+              },
+              "qty": {
+                "type": "integer",
+                "description": "positiv; nur bei korrektur mit Vorzeichen"
+              },
+              "note": {
+                "type": "string"
+              },
+              "placementId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "drinkFrom": {
+          "$ref": "#/$defs/year"
+        },
+        "peak": {
+          "$ref": "#/$defs/year"
+        },
+        "drinkUntil": {
+          "$ref": "#/$defs/year"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "price": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "€ pro Flasche"
+        },
+        "food": {
+          "type": "string"
+        },
+        "servingTemp": {
+          "type": "string"
+        },
+        "decant": {
+          "type": "string"
+        },
+        "rating": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 5
+        },
+        "externalRatings": {
+          "type": "string"
+        },
+        "tastings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "date",
+              "text"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string",
+                "format": "date"
+              },
+              "text": {
+                "type": "string"
+              },
+              "rating": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 5
+              }
+            }
+          }
+        },
+        "photo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Data-URL (JPEG, max. 1000 px)"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "isDemo": {
+          "type": "boolean"
+        },
+        "origin": {
+          "enum": [
+            "keller",
+            "extern"
+          ],
+          "description": "keller = eigener Bestand; extern = woanders getrunken, ohne Bestand"
+        },
+        "externalPlace": {
+          "type": "string",
+          "description": "wo/bei wem getrunken (extern)"
+        },
+        "wishlist": {
+          "type": "boolean",
+          "description": "auf der Nachkaufliste"
+        },
+        "vivinoRating": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Vivino-Community-Bewertung, manuell gepflegt"
+        },
+        "vivinoUrl": {
+          "type": "string",
+          "pattern": "^(https://(www\\.)?vivino\\.com/.*)?$"
+        }
+      }
+    }
+  }
+}
