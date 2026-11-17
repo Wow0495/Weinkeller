@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Weinkeller-Backup",
-  "description": "Format der JSON-Backup-Datei (schemaVersion 2). Menge wird nicht gespeichert, sondern aus movements berechnet. Ältere Dateien (Version 1) werden beim Import automatisch migriert.",
+  "description": "Format der JSON-Backup-Datei und der Sync-Datei weinkeller.json (schemaVersion 3). Menge wird aus movements berechnet. Ältere Dateien (Version 1–2) werden beim Import automatisch migriert.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -11,7 +11,7 @@
   "properties": {
     "schemaVersion": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "app": {
       "const": "weinkeller"
@@ -91,6 +91,11 @@
                 }
               }
             }
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "letzte Änderung (für den Sync)"
           }
         }
       }
@@ -99,6 +104,14 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/wine"
+      }
+    },
+    "deleted": {
+      "type": "object",
+      "description": "Lösch-Vermerke für den Geräte-Sync: ID (Wein, Buchung, Notiz, Lager, Regal) → Zeitpunkt der Löschung",
+      "additionalProperties": {
+        "type": "string",
+        "format": "date-time"
       }
     }
   },

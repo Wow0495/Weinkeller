@@ -10,7 +10,16 @@
 - **Woanders getrunken:** Unter „Neu“ oben „Woanders getrunken“ wählen, um Weine aus dem Restaurant oder von Freunden festzuhalten (Ort, Datum, Sterne, Notiz, Nachkaufliste). Du findest sie im Keller unter „Woanders getrunken“. Hast du ihn gekauft? „Gekauft → in den Keller“.
 - **Vivino:** Bewertung unter „Mehr Details → Bewertungen“ eintragen. „Auf Vivino suchen“ öffnet die passende Vivino-Seite. Vivino hat keine offizielle Schnittstelle, deshalb wird nichts automatisch abgerufen.
 
-## Neu in Version 3: Design „Weinfarben“
+## Neu in Version 4: Mehrere Geräte abgleichen
+Alle Handys und der Laptop arbeiten mit denselben Daten, ganz ohne Backup-Dateien hin und her zu schicken. Der Abgleich läuft über ein **privates** Repository in deinem GitHub-Konto.
+1. Auf github.com/new ein Repository `weinkeller-daten` anlegen, **Private** auswählen. Nicht das öffentliche Repository der App-Webseite nehmen.
+2. Auf github.com/settings/personal-access-tokens/new einen Schlüssel erstellen: Ablauf 1 Jahr, „Only select repositories“ → `weinkeller-daten`, „Contents: Read and write“.
+3. In der App unter ⚙︎ → „Mehrere Geräte abgleichen“ Repository und Schlüssel eintragen und „Verbinden“ tippen. Das machst du einmal pro Gerät, derselbe Schlüssel funktioniert überall.
+
+Danach gleicht die App automatisch ab: beim Öffnen, nach jeder Änderung und jede Minute. Das kleine Pfeil-Symbol oben zeigt den Stand (grün = abgeglichen) und gleicht beim Antippen sofort ab. Buchen zwei Handys gleichzeitig Flaschen ab, zählen beide Buchungen. Gelöschtes bleibt überall gelöscht.
+Der Schlüssel bleibt nur auf dem jeweiligen Gerät und steht nicht im Backup. Nach einem Jahr läuft er ab, dann einen neuen erstellen, in der App „Trennen“ und neu verbinden. Ein JSON-Backup ab und zu bleibt trotzdem sinnvoll.
+
+## Version 3: Design „Weinfarben“
 - Jede Weinfarbe hat ihre eigene Farbe (Streifen und Jahrgang), die Suche steht direkt auf der Übersicht. Tipp: „passt zu Lamm“ eintippen, dann filtert die App nach Speisen.
 - Lagerplan als Kurzansicht auf der Übersicht, volle Ansicht über „Plan“ oder im Keller über „Lagerplan“.
 - Am Laptop: Navigation links und zweispaltige Übersicht und Detailansicht.

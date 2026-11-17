@@ -2,7 +2,7 @@
    (z. B. GitHub Pages). Strategie: "Netz zuerst, sonst Cache" für die App-
    Dateien. So kommen Updates sofort an, offline läuft die letzte Version.
    Deine Weindaten liegen NICHT hier, sondern in IndexedDB. */
-const CACHE = 'weinkeller-v3';
+const CACHE = 'weinkeller-v4';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

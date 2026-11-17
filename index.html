@@ -107,6 +107,23 @@ svg { flex-shrink: 0; }
 .hidden { display: none !important; }
 .serif { font-family: var(--serif); }
 
+/* Sync-Anzeige in der Kopfzeile: Punkt zeigt den Zustand */
+.iconbtn.sync { position: relative; }
+.iconbtn.sync .dot { position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--surface-2); background: var(--s-none); }
+.iconbtn.sync.st-ok .dot { background: var(--s-reif); }
+.iconbtn.sync.st-busy .dot { background: var(--s-bald); }
+.iconbtn.sync.st-busy svg { animation: spin 1.2s linear infinite; }
+.iconbtn.sync.st-error .dot { background: var(--s-over); }
+.iconbtn.sync.st-offline .dot { background: var(--s-none); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .iconbtn.sync.st-busy svg { animation: none; } }
+.sync-box .state { display: flex; align-items: center; gap: .5rem; font-weight: 600; }
+.sync-box .state::before { content: ""; width: .7rem; height: .7rem; border-radius: 50%; background: var(--s-none); }
+.sync-box .state.st-ok::before { background: var(--s-reif); } .sync-box .state.st-busy::before { background: var(--s-bald); }
+.sync-box .state.st-error::before { background: var(--s-over); }
+.steps { padding-left: 1.2rem; } .steps li { margin: .35rem 0; }
+code.k { background: var(--surface-3); padding: .05rem .35rem; border-radius: 4px; font-size: .9em; }
+
 /* Kopfzeile */
 header.top {
   position: sticky; top: 0; z-index: 10; background: var(--bg);
@@ -376,6 +393,10 @@ table.simple th, table.simple td { text-align: left; padding: .4rem .3rem; borde
 <a href="#main" class="sr-only">Zum Inhalt springen</a>
 <header class="top">
   <span class="crumb" id="crumb"></span>
+  <button id="btn-sync" class="iconbtn sync hidden" type="button" aria-label="Geräte-Abgleich" title="Geräte-Abgleich">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+    <span class="dot" aria-hidden="true"></span>
+  </button>
   <button id="btn-settings" class="iconbtn" type="button" aria-label="Daten, Backup und Einstellungen" title="Daten & Backup">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
   </button>
@@ -385,7 +406,7 @@ table.simple th, table.simple td { text-align: left; padding: .4rem .3rem; borde
   <a href="#/uebersicht" data-nav="uebersicht"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/></svg>Übersicht</a>
   <a href="#/keller" data-nav="keller"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="18" height="18"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>Keller</a>
   <a href="#/neu" data-nav="neu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>Neu</a>
-  <div class="side-foot"><a href="#/daten">Daten &amp; Backup</a><br><span id="side-backup"></span></div>
+  <div class="side-foot"><a href="#/daten">Daten &amp; Backup</a><br><span id="side-backup"></span><br><span id="side-sync"></span></div>
 </nav>
 <main id="main" tabindex="-1"></main>
 <div id="live" class="sr-only" aria-live="polite"></div>
@@ -419,7 +440,7 @@ table.simple th, table.simple td { text-align: left; padding: .4rem .3rem; borde
    1. SCHEMA
    Das vollständige JSON-Schema liegt zusätzlich als schema.json bei.
    ========================================================================= */
-const SCHEMA_VERSION = 2;   // v2: Herkunft (Keller/extern), Nachkauf-Wunsch, Vivino
+const SCHEMA_VERSION = 3;   // v2: Herkunft, Nachkaufliste, Vivino · v3: Lösch-Vermerke für den Geräte-Sync
 const APP_ID = 'weinkeller';
 
 /** Weintypen: interner Schlüssel → Anzeigename */
@@ -510,7 +531,8 @@ function emptyState() {
     app: APP_ID,
     wines: [],
     locations: defaultLocations(),
-    meta: { lastBackupAt: null, theme: 'auto', createdAt: new Date().toISOString() }
+    meta: { lastBackupAt: null, theme: 'auto', createdAt: new Date().toISOString() },
+    deleted: {}          // v3: {id: Zeitpunkt} gelöschter Weine/Buchungen/Notizen/Lagerorte (für den Sync)
   };
 }
 
@@ -567,8 +589,10 @@ const MIGRATIONS = {
     });
     s.schemaVersion = 2;
     return s;
-  }
-  // Nächste Änderung: 2: s => { …; s.schemaVersion = 3; return s; }
+  },
+  // v2 → v3: Lösch-Vermerke, damit Gelöschtes beim Abgleich nicht von anderen Geräten zurückkommt
+  2: s => { s.deleted = s.deleted || {}; s.schemaVersion = 3; return s; },
+  // Nächste Änderung: 3: s => { …; s.schemaVersion = 4; return s; }
 };
 
 function migrate(state) {
@@ -586,6 +610,7 @@ function migrate(state) {
   state.wines = (state.wines || []).map(w => Object.assign(emptyWine(), w));
   state.locations = Array.isArray(state.locations) && state.locations.length ? state.locations : defaultLocations();
   state.meta = Object.assign({ lastBackupAt: null, theme: 'auto' }, state.meta || {});
+  state.deleted = state.deleted && typeof state.deleted === 'object' && !Array.isArray(state.deleted) ? state.deleted : {};
   state.app = APP_ID;
   return state;
 }
@@ -1059,6 +1084,96 @@ function parseImportJSON(text) {
   return s;
 }
 
+/* =========================================================================
+   6. LOGIC – Geräte-Sync: Zusammenführen zweier Stände
+   -------------------------------------------------------------------------
+   Regeln (gelten für beliebig viele Geräte, Reihenfolge egal):
+   • Weine: Vereinigung über die ID. Gibt es einen Wein auf beiden Seiten,
+     liefert die zuletzt geänderte Fassung die Felder (Name, Trinkfenster …).
+   • Buchungen und Verkostungsnotizen werden IMMER vereinigt – zwei Handys,
+     die je eine Flasche abbuchen, ergeben zusammen −2. Nichts geht verloren.
+   • Gelöschtes (Wein, Buchung, Notiz, Lagerort) steht in state.deleted und
+     bleibt gelöscht, auch wenn ein anderes Gerät es noch hat.
+   • Lagerplätze kommen aus der neueren Fassung; liegen danach mehr Flaschen
+     auf Plätzen als im Bestand, wird hinten abgezogen.
+   • Haben zwei Geräte dieselbe letzte Flasche abgebucht (Bestand < 0), wird
+     eine Korrekturbuchung angelegt. Ihre ID ist eindeutig bestimmt, damit
+     mehrere Geräte nicht doppelt korrigieren.
+   • Darstellung (meta.theme) bleibt pro Gerät; lastBackupAt = jüngster Wert.
+   ========================================================================= */
+function tomb(state, id) { (state.deleted ||= {})[id] = new Date().toISOString(); }
+
+function mergeSync(local, remote) {
+  const out = deepClone(local);
+  const del = { ...(local.deleted || {}) };
+  for (const [k, v] of Object.entries(remote.deleted || {})) if (!del[k] || String(v) > String(del[k])) del[k] = v;
+  out.deleted = del;
+  const gone = id => Object.prototype.hasOwnProperty.call(del, id);
+  const unionById = (a = [], b = []) => {
+    const m = new Map();
+    for (const x of [...a, ...b]) if (x && x.id && !m.has(x.id)) m.set(x.id, x);
+    return [...m.values()].filter(x => !gone(x.id));
+  };
+  const byId = new Map();
+  for (const w of [...(local.wines || []), ...(remote.wines || [])]) {
+    if (gone(w.id)) continue;
+    const ex = byId.get(w.id);
+    if (!ex) { byId.set(w.id, deepClone(w)); continue; }
+    // neuere Fassung gewinnt; bei exakt gleicher Zeit entscheidet ein fester Vergleich (auf allen Geräten gleich)
+    const cmp = String(w.updatedAt).localeCompare(String(ex.updatedAt)) || JSON.stringify(w).localeCompare(JSON.stringify(ex));
+    const [newer, older] = cmp > 0 ? [w, ex] : [ex, w];
+    const m = deepClone(newer);
+    m.movements = deepClone(unionById(newer.movements, older.movements)).sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.id.localeCompare(b.id));
+    m.tastings = deepClone(unionById(newer.tastings, older.tastings)).sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.id.localeCompare(b.id));
+    byId.set(w.id, m);
+  }
+  out.wines = [...byId.values()].map(w => {
+    w.movements = (w.movements || []).filter(x => !gone(x.id));
+    w.tastings = (w.tastings || []).filter(x => !gone(x.id));
+    w.placements = (w.placements || []).filter(p => !gone(p.locationId) && !gone(p.zoneId));
+    if (w.origin !== 'extern') {
+      const q = quantity(w);
+      if (q < 0) {
+        const last = [...w.movements].sort((a, b) => a.id.localeCompare(b.id)).at(-1);
+        w.movements.push({ id: `sync-fix-${w.id}-${last ? last.id : '0'}`, date: todayISO(), kind: 'korrektur', qty: -q, note: 'Automatisch: dieselbe Flasche wurde auf zwei Geräten abgebucht' });
+      }
+      let over = placedCount(w) - Math.max(0, quantity(w));
+      for (const p of [...w.placements].reverse()) { if (over <= 0) break; const n = Math.min(p.count, over); p.count -= n; over -= n; }
+    }
+    return w;
+  });
+  // Lagerorte: Vereinigung, Zonen je Lager ebenfalls
+  const locs = new Map();
+  for (const l of [...(local.locations || []), ...(remote.locations || [])]) {
+    if (gone(l.id)) continue;
+    const ex = locs.get(l.id);
+    if (!ex) { locs.set(l.id, deepClone(l)); continue; }
+    // gleiche ID: zuletzt geänderte Fassung (Name, Reihen, Fächer) gewinnt, Regale werden vereinigt
+    const newer = String(l.updatedAt || '') > String(ex.updatedAt || '') ? deepClone(l) : ex, older = newer === ex ? l : ex;
+    for (const z of older.zones) if (!newer.zones.find(y => y.id === z.id)) newer.zones.push(deepClone(z));
+    locs.set(l.id, newer);
+  }
+  out.locations = [...locs.values()].map(l => ({ ...l, zones: l.zones.filter(z => !gone(z.id)) })).filter(l => l.zones.length);
+  if (!out.locations.length) out.locations = deepClone(local.locations);
+  const lb = [local.meta && local.meta.lastBackupAt, remote.meta && remote.meta.lastBackupAt].filter(Boolean).sort().at(-1) || null;
+  out.meta = { ...(local.meta || {}), lastBackupAt: lb };
+  out.schemaVersion = SCHEMA_VERSION;
+  return out;
+}
+
+/** Vergleichbare Darstellung eines Stands (Schlüssel sortiert, gerätespezifisches weggelassen) */
+function canonical(state) {
+  const sortKeys = v => Array.isArray(v) ? v.map(sortKeys)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys(v[k])])) : v;
+  const s = deepClone(state);
+  delete s.exportedAt;
+  s.meta = { lastBackupAt: (s.meta && s.meta.lastBackupAt) || null };
+  const byId = (a, b) => String(a.id).localeCompare(String(b.id));
+  s.wines = (s.wines || []).map(w => ({ ...w, movements: [...(w.movements || [])].sort(byId), tastings: [...(w.tastings || [])].sort(byId) })).sort(byId);
+  s.locations = (s.locations || []).map(l => ({ ...l, zones: [...l.zones].sort(byId) })).sort(byId);
+  return JSON.stringify(sortKeys(s));
+}
+
 /** Zusammenführen: gleiche ID → neuere Änderung gewinnt; neue Lagerorte werden ergänzt */
 function mergeStates(cur, inc) {
   const res = deepClone(cur);
@@ -1261,6 +1376,7 @@ const Store = {
       mutator(this.state);
       await this.storage.save(this.state);
       Marker.set(this.state.wines.length);
+      Sync.schedule();                       // Änderung an andere Geräte weitergeben
       this.lostDataWarning = false;
       this.requestPersistence();
       return true;
@@ -1277,7 +1393,214 @@ const Store = {
     try { this.persisted = await navigator.storage.persist(); } catch {}
   },
 
+  /** Übernimmt einen kompletten Stand (vom Sync), ohne erneut einen Sync auszulösen */
+  async replace(state) {
+    await this.storage.save(state);
+    this.state = state;
+    Marker.set(state.wines.length);
+  },
+
   wine(id) { return this.state.wines.find(w => w.id === id); }
+};
+
+/* =========================================================================
+   7b. SYNC – Abgleich mehrerer Geräte über ein PRIVATES GitHub-Repository
+   -------------------------------------------------------------------------
+   Ablauf eines Abgleichs (Sync.run):
+     1. Datei weinkeller.json aus dem Repository laden (falls vorhanden)
+     2. mit dem lokalen Stand zusammenführen (mergeSync, siehe Logik-Schicht)
+     3. Ergebnis lokal speichern und – wenn es sich vom Online-Stand
+        unterscheidet – hochladen. GitHub prüft dabei per „sha“, dass
+        zwischenzeitlich kein anderes Gerät geschrieben hat; sonst beginnt
+        der Abgleich von vorn (max. 3 Versuche).
+   Wann: beim Start, wenn die App wieder sichtbar wird, nach jeder Änderung
+   (kurz verzögert), jede Minute im Vordergrund und auf Knopfdruck.
+
+   Zugangsdaten (Repository + Schlüssel) liegen NUR in localStorage dieses
+   Geräts, nie im Backup und nie im Repository.
+   Verschlüsselt wird bewusst nicht (Entscheidung der Nutzerin); damit die
+   Weinliste nicht öffentlich wird, verweigert die App öffentliche Repos.
+   ========================================================================= */
+const b64encode = str => {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const b64decode = b64 => new TextDecoder().decode(Uint8Array.from(atob(String(b64).replace(/\s/g, '')), c => c.charCodeAt(0)));
+
+const Sync = {
+  FILE: 'weinkeller.json',
+  KEY: 'weinkeller.sync',
+  cfg: null,            // {repo, token, device, lastSyncAt}
+  busy: false, again: false, timer: null, poller: null,
+  status: { state: 'off', text: 'Nicht verbunden' },   // off | ok | busy | offline | error
+
+  load() { try { this.cfg = JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch { this.cfg = null; } },
+  save() { try { localStorage.setItem(this.KEY, JSON.stringify(this.cfg)); } catch {} },
+  get on() { return !!(this.cfg && this.cfg.repo && this.cfg.token); },
+
+  setStatus(state, text) {
+    this.status = { state, text };
+    if (typeof UI !== 'undefined' && UI.updateSyncBadge) UI.updateSyncBadge();
+  },
+
+  /** Ein Aufruf der GitHub-API für das konfigurierte Repository */
+  async api(cfg, path, { method = 'GET', body, accept } = {}) {
+    let res;
+    try {
+      res = await fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
+        method, cache: 'no-store',
+        headers: {
+          'Authorization': `Bearer ${cfg.token}`,
+          'Accept': accept || 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          ...(body ? { 'Content-Type': 'application/json' } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+    } catch {
+      const e = new Error('Keine Verbindung zu GitHub (offline?). Die Änderungen werden später abgeglichen.');
+      e.offline = true; throw e;
+    }
+    return res;
+  },
+
+  /** Verständliche Meldung zu einem HTTP-Fehler */
+  async fail(res, what) {
+    let msg = '';
+    try { msg = (await res.json()).message || ''; } catch {}
+    if (res.status === 401) return new Error('Der Zugangsschlüssel ist ungültig oder abgelaufen. Bitte einen neuen Schlüssel erstellen und hier eintragen.');
+    if (res.status === 403 && /rate limit/i.test(msg)) return new Error('GitHub bremst gerade zu viele Anfragen. In ein paar Minuten klappt es wieder.');
+    if (res.status === 403) return new Error('Der Schlüssel darf dieses Repository nicht ändern. Beim Schlüssel „Contents: Read and write“ für genau dieses Repository erlauben.');
+    if (res.status === 404) return new Error(what === 'repo' ? 'Repository nicht gefunden. Schreibweise „benutzername/repository“ prüfen – und ob der Schlüssel Zugriff auf genau dieses Repository hat.' : 'Datei nicht gefunden.');
+    return new Error(`GitHub meldet Fehler ${res.status}${msg ? ': ' + msg : ''}.`);
+  },
+
+  /** Prüft Zugang und dass das Repository privat ist */
+  async checkRepo(cfg) {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(cfg.repo)) throw new Error('Bitte das Repository als „benutzername/repository“ eintragen, z. B. maria/weinkeller-daten.');
+    const r = await this.api(cfg, '');
+    if (!r.ok) throw await this.fail(r, 'repo');
+    const j = await r.json();
+    if (!j.private) throw new Error('Dieses Repository ist öffentlich – deine Weinliste wäre für alle sichtbar. Bitte ein PRIVATES Repository verwenden (nicht das der App-Webseite).');
+    if (j.permissions && j.permissions.push === false) throw new Error('Der Schlüssel hat nur Leserechte. Bitte „Contents: Read and write“ erlauben.');
+    return j;
+  },
+
+  /** Lädt den Online-Stand: {sha, state} oder null, wenn es noch keinen gibt */
+  async pull(cfg) {
+    const r = await this.api(cfg, `/contents/${this.FILE}`);
+    if (r.status === 404) return null;
+    if (!r.ok) throw await this.fail(r, 'file');
+    const j = await r.json();
+    let text;
+    if (j.content && j.encoding === 'base64') text = b64decode(j.content);
+    else {                                   // große Dateien (z. B. viele Fotos) kommen nur „roh“
+      const r2 = await this.api(cfg, `/contents/${this.FILE}`, { accept: 'application/vnd.github.raw+json' });
+      if (!r2.ok) throw await this.fail(r2, 'file');
+      text = await r2.text();
+    }
+    let data;
+    try { data = JSON.parse(text); } catch { throw new Error('Die Online-Datei ist beschädigt. Bitte am Laptop ein Backup prüfen.'); }
+    return { sha: j.sha, state: migrate(data) };
+  },
+
+  /** Lädt einen Stand hoch. Rückgabe: neue sha oder false bei Konflikt */
+  async push(cfg, state, sha) {
+    const body = { message: `Weinkeller: Abgleich von ${cfg.device || 'einem Gerät'}`, content: b64encode(exportJSON(state)) };
+    if (sha) body.sha = sha;
+    const r = await this.api(cfg, `/contents/${this.FILE}`, { method: 'PUT', body });
+    if (r.status === 409 || r.status === 422) return false;
+    if (!r.ok) throw await this.fail(r, 'file');
+    return (await r.json()).content.sha;
+  },
+
+  /** Ein kompletter Abgleich. mode: 'merge' (normal) | 'takeRemote' (lokale Daten durch Online-Stand ersetzen) */
+  async run(reason = 'auto', mode = 'merge') {
+    if (!this.on) return;
+    if (this.busy) { this.again = true; return; }
+    if (navigator.onLine === false) { this.setStatus('offline', 'Offline – wird abgeglichen, sobald Internet da ist'); return; }
+    this.busy = true; this.setStatus('busy', 'Gleiche ab …');
+    const cfg = this.cfg;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const remote = await this.pull(cfg);
+        const before = canonical(Store.state);
+        let merged;
+        if (!remote) merged = Store.state;
+        else if (mode === 'takeRemote') merged = Object.assign(remote.state, { meta: { ...remote.state.meta, theme: Store.state.meta.theme } });
+        else merged = mergeSync(Store.state, remote.state);
+        const localChanged = canonical(merged) !== before;
+        if (localChanged) await Store.replace(merged);
+        if (!remote || canonical(merged) !== canonical(remote.state)) {
+          const sha = await this.push(cfg, merged, remote && remote.sha);
+          if (sha === false) continue;      // ein anderes Gerät war schneller → nochmal
+        }
+        cfg.lastSyncAt = new Date().toISOString(); this.save();
+        this.setStatus('ok', `Abgeglichen ${new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`);
+        if (localChanged && typeof UI !== 'undefined') UI.afterSync(reason);
+        return true;
+      }
+      throw new Error('Zu viele gleichzeitige Änderungen – bitte gleich nochmal versuchen.');
+    } catch (e) {
+      this.setStatus(e.offline ? 'offline' : 'error', e.message);
+      if (reason === 'manual' || reason === 'connect') throw e;
+      return false;
+    } finally {
+      this.busy = false;
+      if (this.again) { this.again = false; this.schedule(300); }
+    }
+  },
+
+  /** Nach einer lokalen Änderung: kurz warten (mehrere Klicks bündeln), dann abgleichen */
+  schedule(ms = 1500) {
+    if (!this.on) return;
+    clearTimeout(this.timer);
+    this.setStatus('busy', 'Änderung wird abgeglichen …');
+    this.timer = setTimeout(() => this.run('change'), ms);
+  },
+
+  /** Verbindet dieses Gerät. mode wie bei run(). Wirft Fehler mit deutscher Meldung. */
+  async connect({ repo, token, device }, mode) {
+    const cfg = { repo: repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, ''), token: token.trim(), device: (device || '').trim() };
+    await this.checkRepo(cfg);
+    this.cfg = cfg; this.save();
+    try { await this.run('connect', mode); }
+    catch (e) { this.cfg = null; this.save(); this.setStatus('off', 'Nicht verbunden'); throw e; }
+    this.startTimers();
+  },
+
+  /** Prüft vorab, ob es online schon Daten gibt (für die Frage „zusammenführen oder übernehmen?“) */
+  async peek({ repo, token }) {
+    const cfg = { repo: repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, ''), token: token.trim() };
+    await this.checkRepo(cfg);
+    const r = await this.pull(cfg);
+    return r ? r.state.wines.length : null;
+  },
+
+  disconnect() {
+    clearTimeout(this.timer); clearInterval(this.poller);
+    this.cfg = null; localStorage.removeItem(this.KEY);
+    this.setStatus('off', 'Nicht verbunden');
+  },
+
+  startTimers() {
+    clearInterval(this.poller);
+    if (!this.on) return;
+    this.poller = setInterval(() => { if (document.visibilityState === 'visible') this.run('poll'); }, 60000);
+  },
+
+  init() {
+    this.load();
+    // Listener immer anmelden – run() tut nichts, solange kein Sync eingerichtet ist
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.run('resume'); });
+    window.addEventListener('online', () => this.run('online'));
+    if (!this.on) return;
+    this.setStatus('busy', 'Gleiche ab …');
+    this.run('start');
+    this.startTimers();
+  }
 };
 
 /* =========================================================================
@@ -1373,6 +1696,28 @@ const UI = {
     return opts.join('');
   },
 
+  /* ---------- Geräte-Abgleich ---------- */
+  updateSyncBadge() {
+    const b = $('#btn-sync'), st = Sync.status;
+    if (b) {
+      b.classList.toggle('hidden', !Sync.on);
+      b.className = b.className.replace(/\bst-\w+/g, '').trim() + ' st-' + st.state;
+      b.title = `Geräte-Abgleich: ${st.text}. Antippen zum Abgleichen.`; b.setAttribute('aria-label', b.title);
+    }
+    const side = $('#side-sync'); if (side) side.textContent = Sync.on ? `Abgleich: ${st.text}` : '';
+    const box = $('#sync-state');
+    if (box) { box.className = 'state st-' + st.state; box.textContent = st.text; }
+    const last = $('#sync-last'); if (last && Sync.cfg && Sync.cfg.lastSyncAt) last.textContent = new Date(Sync.cfg.lastSyncAt).toLocaleString('de-DE');
+  },
+  /** Nach einem Abgleich mit neuen Daten von anderen Geräten */
+  afterSync(reason) {
+    const r = route().name, editing = ['neu', 'bearbeiten', 'duplizieren', 'einlagern'].includes(r) || $('#dlg').open
+      || (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && document.activeElement.id !== 'ov-q' && document.activeElement.id !== 'q');
+    if (editing) { this.toast('Neue Daten von einem anderen Gerät – sichtbar, sobald du hier fertig bist.'); return; }
+    if (reason !== 'connect' && reason !== 'change') this.toast('Änderungen von einem anderen Gerät übernommen.');
+    render();
+  },
+
   /* ---------- Rückmeldungen ---------- */
   toast(text, action) {
     clearTimeout(this.toastTimer);
@@ -1424,7 +1769,7 @@ const UI = {
     if (!ok) return;
     render();
     this.toast(`1 × ${w.name} getrunken${from}. Prost!`, { label: 'Rückgängig', fn: async () => {
-      await Store.commit(s => undoMovement(s.wines.find(x => x.id === id), movId, snap));
+      await Store.commit(s => { undoMovement(s.wines.find(x => x.id === id), movId, snap); tomb(s, movId); });
       render(); this.toast('Entnahme rückgängig gemacht.');
     } });
   }
@@ -1954,10 +2299,54 @@ function viewDetail(id) {
 /* =========================================================================
    DATEN & BACKUP & EINSTELLUNGEN
    ========================================================================= */
+/** Abschnitt „Mehrere Geräte abgleichen“ (GitHub-Sync) */
+function viewSyncSection() {
+  const st = Sync.status, c = Sync.cfg;
+  if (Sync.on) return `<section class="card sync-box" aria-labelledby="h-sync">
+    <h2 id="h-sync" style="margin-top:0">Mehrere Geräte abgleichen</h2>
+    <p id="sync-state" class="state st-${st.state}" role="status">${esc(st.text)}</p>
+    <dl class="facts">
+      <dt>Repository</dt><dd>${esc(c.repo)} (privat)</dd>
+      <dt>Dieses Gerät</dt><dd>${esc(c.device || '–')}</dd>
+      <dt>Letzter Abgleich</dt><dd id="sync-last">${c.lastSyncAt ? new Date(c.lastSyncAt).toLocaleString('de-DE') : 'noch nicht'}</dd>
+    </dl>
+    <div class="row" style="margin-top:.75rem"><button class="primary" data-act="sync-now">Jetzt abgleichen</button><button data-act="sync-off">Auf diesem Gerät trennen</button></div>
+    <p class="small muted">Die App gleicht automatisch ab: beim Öffnen, nach jeder Änderung und jede Minute. Der Zugangsschlüssel ist nur auf diesem Gerät gespeichert, nicht im Backup. Läuft er ab, meldet die App das – dann einen neuen Schlüssel erstellen, hier trennen und neu verbinden.</p>
+  </section>`;
+  return `<section class="card sync-box" aria-labelledby="h-sync">
+    <h2 id="h-sync" style="margin-top:0">Mehrere Geräte abgleichen</h2>
+    <p>Alle Handys und der Laptop arbeiten mit denselben Daten – ohne Backup-Dateien hin und her zu schicken. Die App gleicht automatisch über ein <strong>privates</strong> Repository in deinem GitHub-Konto ab. Kostenlos.</p>
+    <details><summary><strong>Einmalig einrichten</strong> (ca. 5 Minuten, am einfachsten am Laptop)</summary>
+      <ol class="steps">
+        <li>Auf <a href="https://github.com/new" target="_blank" rel="noopener noreferrer">github.com/new</a> ein neues Repository anlegen: Name z. B. <code class="k">weinkeller-daten</code>, <strong>Private</strong> auswählen, „Create repository“. <em>Nicht</em> das öffentliche Repository der App-Webseite verwenden.</li>
+        <li>Zugangsschlüssel erstellen: <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">github.com/settings/personal-access-tokens/new</a>
+          <ul><li>Token name: <code class="k">Weinkeller</code>, Expiration: 1 Jahr</li>
+          <li>Repository access: <strong>Only select repositories</strong> → <code class="k">weinkeller-daten</code></li>
+          <li>Permissions → Repository permissions → <strong>Contents: Read and write</strong></li>
+          <li>„Generate token“ und den Schlüssel (beginnt mit <code class="k">github_pat_</code>) kopieren.</li></ul></li>
+        <li>Unten eintragen und „Verbinden“. Auf jedem weiteren Handy dasselbe – derselbe Schlüssel darf auf allen Geräten verwendet werden.</li>
+      </ol>
+      <p class="small muted">Tipp: Den Schlüssel schickst du dir am einfachsten per Notiz oder Passwort-Manager aufs Handy. Wer ihn hat, kann deine Weinliste lesen und ändern – aber nichts anderes in deinem GitHub-Konto.</p>
+    </details>
+    <form id="sync-form" novalidate>
+      <label for="s-repo">Repository</label>
+      <input id="s-repo" name="repo" placeholder="benutzername/weinkeller-daten" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(localStorage.getItem('weinkeller.syncRepo') || '')}">
+      <label for="s-token">Zugangsschlüssel</label>
+      <input id="s-token" name="token" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="s-dev">Name dieses Geräts <span class="muted small">(optional)</span></label>
+      <input id="s-dev" name="device" placeholder="z. B. iPhone Maria" autocomplete="off">
+      <div id="sync-err" aria-live="assertive"></div>
+      <button type="submit" class="primary" style="margin-top:.9rem">Verbinden</button>
+    </form>
+    <p class="small muted">Datenschutz: Deine Weindaten liegen dann zusätzlich in deinem privaten GitHub-Repository (GitHub, Server in den USA), unverschlüsselt. Sehen kann sie nur, wer Zugriff auf dein GitHub-Konto oder den Schlüssel hat. Ein öffentliches Repository lehnt die App ab.</p>
+  </section>`;
+}
+
 function viewData() {
   const s = Store.state, lb = s.meta.lastBackupAt;
   const isFile = location.protocol === 'file:';
   return `<h1>Daten & Backup</h1>
+  ${viewSyncSection()}
   <section class="card">
     <h2 style="margin-top:0">Backup</h2>
     <p>Letztes Backup: <strong>${lb ? fmtDate(lb) + ` (vor ${daysBetween(lb, new Date().toISOString())} Tagen)` : 'noch nie'}</strong></p>
@@ -2052,6 +2441,7 @@ function render() {
   if (render.lastRoute !== location.hash) { window.scrollTo(0, 0); const af = $('[autofocus]', m); if (af && matchMedia('(min-width: 700px)').matches) af.focus(); else m.focus({ preventScroll: true }); }
   else window.scrollTo(0, keepScroll);
   render.lastRoute = location.hash;
+  UI.updateSyncBadge();
 }
 
 /* ---------- Formular-Verhalten ---------- */
@@ -2121,11 +2511,16 @@ document.addEventListener('click', async e => {
     case 'demo-del': {
       const n = s.wines.filter(w => w.isDemo).length;
       if (!(await UI.confirm('Beispielweine löschen?', `${n} Beispielweine werden entfernt. Deine eigenen Weine bleiben.`, 'Löschen', true))) return;
-      await Store.commit(st => { st.wines = st.wines.filter(w => !w.isDemo); }); UI.toast('Beispielweine gelöscht.'); return render();
+      await Store.commit(st => { st.wines.filter(w => w.isDemo).forEach(w => tomb(st, w.id)); st.wines = st.wines.filter(w => !w.isDemo); }); UI.toast('Beispielweine gelöscht.'); return render();
     }
     case 'wipe': {
-      if (!(await UI.confirm('Wirklich ALLES löschen?', 'Alle Weine, Historie und Lagerorte werden gelöscht. Das lässt sich nur mit einem Backup rückgängig machen.', 'Alles löschen', true))) return;
-      await Store.commit(st => { const fresh = emptyState(); Object.keys(st).forEach(k => delete st[k]); Object.assign(st, fresh); });
+      if (Sync.on) {
+        if (!(await UI.confirm('Wirklich ALLE Weine löschen?', 'Der Abgleich ist eingeschaltet: Alle Weine samt Historie werden auf ALLEN verbundenen Geräten gelöscht. Die Lagerorte bleiben. Rückgängig nur mit einem Backup.', 'Überall löschen', true))) return;
+        await Store.commit(st => { st.wines.forEach(w => tomb(st, w.id)); st.wines = []; });
+      } else {
+        if (!(await UI.confirm('Wirklich ALLES löschen?', 'Alle Weine, Historie und Lagerorte werden gelöscht. Das lässt sich nur mit einem Backup rückgängig machen.', 'Alles löschen', true))) return;
+        await Store.commit(st => { const fresh = emptyState(); Object.keys(st).forEach(k => delete st[k]); Object.assign(st, fresh); });
+      }
       Marker.set(0); UI.toast('Alle Daten gelöscht.'); location.hash = '#/uebersicht'; return render();
     }
     case 'toggle-filter': UI.filterOpen = !UI.filterOpen; $('#filters').classList.toggle('hidden', !UI.filterOpen); return b.setAttribute('aria-expanded', UI.filterOpen);
@@ -2154,6 +2549,12 @@ document.addEventListener('click', async e => {
       await Store.commit(st => { const x = st.wines.find(x => x.id === b.dataset.id); x.wishlist = !x.wishlist; x.updatedAt = new Date().toISOString(); });
       UI.toast(Store.wine(b.dataset.id).wishlist ? 'Auf die Nachkaufliste gesetzt.' : 'Von der Nachkaufliste genommen.'); return render();
     }
+    case 'sync-now':
+      try { await Sync.run('manual'); UI.toast('Abgeglichen – alle Geräte sind auf dem gleichen Stand.'); } catch (err) { UI.toast(err.message); }
+      return render();
+    case 'sync-off':
+      if (!(await UI.confirm('Abgleich auf diesem Gerät beenden?', 'Deine Weine bleiben auf diesem Gerät und online erhalten. Andere Geräte gleichen weiter ab.', 'Trennen'))) return;
+      Sync.disconnect(); UI.toast('Abgleich auf diesem Gerät beendet.'); return render();
     case 'move-open': $('#move-form').classList.remove('hidden'); return $('#mv-kind').focus();
     case 'move-close': return $('#move-form').classList.add('hidden');
     case 'mv-del': {
@@ -2161,7 +2562,7 @@ document.addEventListener('click', async e => {
       const after = quantity(w) - movementDelta(mv);
       if (after < 0) return UI.toast('Diese Buchung kann nicht gelöscht werden – der Bestand würde negativ.');
       if (!(await UI.confirm('Buchung löschen?', `${MOVEMENT_KINDS[mv.kind].label} vom ${fmtDate(mv.date)} (${movementDelta(mv) > 0 ? '+' : ''}${movementDelta(mv)}) wird entfernt. Lagerplätze bitte ggf. unter „Bearbeiten“ anpassen.`, 'Löschen', true))) return;
-      await Store.commit(st => { const x = st.wines.find(x => x.id === r.id); x.movements = x.movements.filter(m => m.id !== mv.id);
+      await Store.commit(st => { const x = st.wines.find(x => x.id === r.id); x.movements = x.movements.filter(m => m.id !== mv.id); tomb(st, mv.id);
         // Lagerplätze dürfen nicht mehr Flaschen zeigen als vorhanden
         let over = placedCount(x) - quantity(x); for (const p of [...x.placements].reverse()) { if (over <= 0) break; const n = Math.min(p.count, over); p.count -= n; over -= n; }
         x.updatedAt = new Date().toISOString(); });
@@ -2169,15 +2570,15 @@ document.addEventListener('click', async e => {
     }
     case 'tasting-del': {
       if (!(await UI.confirm('Notiz löschen?', 'Die Verkostungsnotiz wird entfernt.', 'Löschen', true))) return;
-      await Store.commit(st => { const x = st.wines.find(x => x.id === r.id); x.tastings = x.tastings.filter(t => t.id !== b.dataset.tid); }); return render();
+      await Store.commit(st => { const x = st.wines.find(x => x.id === r.id); x.tastings = x.tastings.filter(t => t.id !== b.dataset.tid); tomb(st, b.dataset.tid); }); return render();
     }
     case 'delete': {
       const w = Store.wine(b.dataset.id);
       if (!(await UI.confirm('Wein endgültig löschen?', `„${w.name} ${UI.vintage(w)}“ samt Historie und Notizen wird gelöscht. Tipp: Ausgetrunkene Weine musst du nicht löschen – sie bleiben als Archiv.`, 'Endgültig löschen', true))) return;
-      await Store.commit(st => { st.wines = st.wines.filter(x => x.id !== w.id); }); UI.toast('Wein gelöscht.'); location.hash = '#/keller'; return;
+      await Store.commit(st => { st.wines = st.wines.filter(x => x.id !== w.id); tomb(st, w.id); }); UI.toast('Wein gelöscht.'); location.hash = '#/keller'; return;
     }
     case 'loc-add': await Store.commit(st => st.locations.push({ id: uuid(), name: 'Neues Lager', zones: [{ id: uuid(), name: 'Regal 1', rows: 4, cols: 6 }] })); return render();
-    case 'zone-add': await Store.commit(st => st.locations.find(l => l.id === b.dataset.loc).zones.push({ id: uuid(), name: 'Neues Regal', rows: 4, cols: 6 })); return render();
+    case 'zone-add': await Store.commit(st => { const l = st.locations.find(l => l.id === b.dataset.loc); l.zones.push({ id: uuid(), name: 'Neues Regal', rows: 4, cols: 6 }); l.updatedAt = new Date().toISOString(); }); return render();
     case 'loc-del': case 'zone-del': {
       const [locId, zoneId] = (b.dataset.zone || b.dataset.loc).split('|');
       const used = s.wines.some(w => w.placements.some(p => p.count > 0 && p.locationId === locId && (!zoneId || p.zoneId === zoneId)));
@@ -2185,8 +2586,8 @@ document.addEventListener('click', async e => {
       if (act === 'loc-del' && s.locations.length <= 1) return UI.toast('Mindestens ein Lager wird benötigt.');
       if (act === 'zone-del' && s.locations.find(l => l.id === locId).zones.length <= 1) return UI.toast('Jedes Lager braucht mindestens ein Regal/Zone.');
       await Store.commit(st => {
-        if (act === 'loc-del') st.locations = st.locations.filter(l => l.id !== locId);
-        else { const l = st.locations.find(l => l.id === locId); l.zones = l.zones.filter(z => z.id !== zoneId); }
+        if (act === 'loc-del') { st.locations = st.locations.filter(l => l.id !== locId); tomb(st, locId); }
+        else { const l = st.locations.find(l => l.id === locId); l.zones = l.zones.filter(z => z.id !== zoneId); tomb(st, zoneId); l.updatedAt = new Date().toISOString(); }
         st.wines.forEach(w => { w.placements = w.placements.filter(p => !(p.locationId === locId && (!zoneId || p.zoneId === zoneId))); });
       });
       return render();
@@ -2211,7 +2612,7 @@ document.addEventListener('change', async e => {
   if (t.id === 'theme') { await Store.commit(st => { st.meta.theme = t.value; }); return applyTheme(); }
   if (t.dataset.locName) {
     const v = t.value.trim(); if (!v) { UI.toast('Der Name darf nicht leer sein.'); return render(); }
-    await Store.commit(st => { st.locations.find(l => l.id === t.dataset.locName).name = v; }); return UI.toast('Gespeichert.');
+    await Store.commit(st => { const l = st.locations.find(l => l.id === t.dataset.locName); l.name = v; l.updatedAt = new Date().toISOString(); }); return UI.toast('Gespeichert.');
   }
   if (t.dataset.zone && t.dataset.k) {
     const [locId, zoneId] = t.dataset.zone.split('|'), k = t.dataset.k;
@@ -2223,7 +2624,7 @@ document.addEventListener('change', async e => {
       const used = s.wines.some(w => quantity(w) > 0 && w.placements.some(p => p.count > 0 && p.locationId === locId && p.zoneId === zoneId && (k === 'rows' ? p.row > n : p.col > n)));
       if (used) { UI.toast(`Verkleinern nicht möglich: Es liegen Flaschen außerhalb von ${n} ${k === 'rows' ? 'Reihen' : 'Fächern'}.`); return render(); }
     }
-    await Store.commit(st => { const zz = findZone(st, locId, zoneId); zz[k] = k === 'name' ? t.value.trim() : toInt(t.value); });
+    await Store.commit(st => { const zz = findZone(st, locId, zoneId); zz[k] = k === 'name' ? t.value.trim() : toInt(t.value); findLocation(st, locId).updatedAt = new Date().toISOString(); });
     return UI.toast('Gespeichert.');
   }
   if (t.id === 'imp-json' && t.files[0]) {
@@ -2235,7 +2636,14 @@ document.addEventListener('change', async e => {
       if (!choice) return;
       let msg;
       await Store.commit(st => {
-        if (choice === 'replace') { Object.keys(st).forEach(k => delete st[k]); Object.assign(st, inc); msg = `${inc.wines.length} Weine wiederhergestellt.`; }
+        if (choice === 'replace') {
+          // Weine, die es nur hier gibt, als gelöscht vermerken – sonst holt der Abgleich sie zurück
+          const keep = new Set(inc.wines.map(w => w.id)), tombs = { ...(inc.deleted || {}) };
+          st.wines.filter(w => !keep.has(w.id)).forEach(w => { tombs[w.id] = new Date().toISOString(); });
+          const theme = st.meta.theme;
+          Object.keys(st).forEach(k => delete st[k]); Object.assign(st, inc, { deleted: tombs }); st.meta.theme = theme;
+          msg = `${inc.wines.length} Weine wiederhergestellt.`;
+        }
         else { const m = mergeStates(st, inc); Object.assign(st, m.state); msg = `${m.added} neu, ${m.updated} aktualisiert.`; }
       });
       $('#imp-result').innerHTML = `<div class="banner info" role="status">✔ ${esc(msg)}</div>`; UI.toast(msg);
@@ -2262,6 +2670,32 @@ document.addEventListener('submit', async e => {
     if (m) { UI.filter.food = m[1]; UI.filter.q = ''; UI.filterOpen = true; }
     location.hash = '#/keller'; return;
   }
+  if (f.id === 'sync-form') {
+    e.preventDefault();
+    const fd = new FormData(f), cfg = { repo: String(fd.get('repo') || ''), token: String(fd.get('token') || ''), device: String(fd.get('device') || '') };
+    const out = $('#sync-err'), btn = f.querySelector('button[type=submit]');
+    const err = m => { out.innerHTML = `<div class="errors" role="alert">${esc(m)}</div>`; };
+    if (!cfg.repo.trim()) return err('Bitte das Repository eintragen, z. B. maria/weinkeller-daten.');
+    if (!cfg.token.trim()) return err('Bitte den Zugangsschlüssel eintragen.');
+    out.innerHTML = ''; btn.disabled = true; btn.textContent = 'Prüfe Zugang …';
+    try {
+      localStorage.setItem('weinkeller.syncRepo', cfg.repo.trim());
+      const remoteCount = await Sync.peek(cfg);
+      const local = Store.state.wines, onlyDemo = local.length > 0 && local.every(w => w.isDemo);
+      let mode = 'merge';
+      if (remoteCount && local.length) {
+        mode = await UI.dialog({ title: 'Es gibt schon Online-Daten',
+          html: `<p>Online liegen <strong>${remoteCount}</strong> Weine (von einem anderen Gerät). Auf diesem Gerät sind <strong>${local.length}</strong>${onlyDemo ? ' Beispielweine' : ''}.</p>
+            <p><strong>Zusammenführen</strong>: beides wird vereint.<br><strong>Online-Daten verwenden</strong>: dieses Gerät übernimmt den Online-Stand, seine bisherigen Weine werden ersetzt.</p>`,
+          buttons: [{ label: 'Abbrechen', value: null }, { label: 'Zusammenführen', value: 'merge', cls: onlyDemo ? '' : 'primary' }, { label: 'Online-Daten verwenden', value: 'takeRemote', cls: onlyDemo ? 'primary' : '' }] });
+        if (!mode) { btn.disabled = false; btn.textContent = 'Verbinden'; return; }
+      } else if (remoteCount && !local.length) mode = 'takeRemote';
+      btn.textContent = 'Gleiche ab …';
+      await Sync.connect(cfg, mode);
+      UI.toast(remoteCount ? 'Verbunden – Daten abgeglichen.' : 'Verbunden – deine Weine liegen jetzt auch online.');
+      return render();
+    } catch (ex) { err(ex.message); btn.disabled = false; btn.textContent = 'Verbinden'; return; }
+  }
   if (f.id === 'move-form') {
     e.preventDefault();
     const fd = new FormData(f); let err;
@@ -2279,6 +2713,10 @@ document.addEventListener('submit', async e => {
 });
 
 $('#btn-settings').addEventListener('click', () => { location.hash = '#/daten'; });
+$('#btn-sync').addEventListener('click', async () => {
+  try { await Sync.run('manual'); UI.toast('Abgeglichen – alle Geräte sind auf dem gleichen Stand.'); }
+  catch (e) { UI.toast(e.message); }
+});
 window.addEventListener('hashchange', render);
 window.addEventListener('scroll', () => $('header.top').classList.toggle('scrolled', window.scrollY > 8), { passive: true });
 
@@ -2294,6 +2732,7 @@ function applyTheme() {
   await Store.init();
   applyTheme();
   render();
+  Sync.init();
   // Service Worker nur über http(s) – per Doppelklick (file://) nicht möglich und nicht nötig.
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service Worker:', err));
