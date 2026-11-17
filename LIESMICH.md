@@ -10,7 +10,20 @@
 - **Woanders getrunken:** Unter „Neu“ oben „Woanders getrunken“ wählen, um Weine aus dem Restaurant oder von Freunden festzuhalten (Ort, Datum, Sterne, Notiz, Nachkaufliste). Du findest sie im Keller unter „Woanders getrunken“. Hast du ihn gekauft? „Gekauft → in den Keller“.
 - **Vivino:** Bewertung unter „Mehr Details → Bewertungen“ eintragen. „Auf Vivino suchen“ öffnet die passende Vivino-Seite. Vivino hat keine offizielle Schnittstelle, deshalb wird nichts automatisch abgerufen.
 
-## Neu in Version 4: Mehrere Geräte abgleichen
+## Neu in Version 5
+**Etikett erkennen (kostenlos):** Unter „Neu“ ganz oben findest du drei Wege, einen Wein schnell zu erfassen.
+- **Etikett fotografieren:** Die App liest den Text direkt auf dem Gerät und füllt Jahrgang, Rebsorte, Region, Qualitätsstufe, Alkohol, Flaschengröße, Weingut und Name vor. Das Foto bleibt auf dem Gerät. Beim ersten Mal lädt die App das Erkennungsprogramm (ca. 10 MB) aus dem Internet, danach geht es auch offline.
+- **Text einfügen:** Den Text vorher mit Live Text (iPhone) oder Google Lens (Android) aus dem Foto kopieren und einfügen. Das ist oft genauer.
+- **Barcode:** Die Nummer eintippen oder, wo das Handy es kann, fotografieren. Die App sucht dann in der freien Datenbank Open Food Facts. Dort stehen vor allem Supermarkt-Weine. Kennt die App den Barcode schon aus deinem Keller, sagt sie es dir.
+
+Erkannte Felder sind gelb markiert, bitte kurz prüfen. Was du selbst eingetragen hast, wird nie überschrieben.
+
+**Lager & Regale bearbeiten:** Unter Lagerplan → „Lager & Regale bearbeiten“, auf der Übersicht bei „Lagerplan“ → „Bearbeiten“ oder unter ⚙︎.
+- Du kannst Lager (Keller, Weinkühlschrank …) anlegen, umbenennen und löschen.
+- Du kannst Regale/Zonen hinzufügen und benennen und Reihen × Fächer mit − / + einstellen.
+- Alles wird sofort gespeichert und mit dem Abgleich auf alle Geräte übertragen. Ändern zwei Geräte gleichzeitig verschiedene Dinge, etwa Name und Reihen, bleiben beide Änderungen erhalten.
+
+## Version 4: Mehrere Geräte abgleichen
 Alle Handys und der Laptop arbeiten mit denselben Daten, ganz ohne Backup-Dateien hin und her zu schicken. Der Abgleich läuft über ein **privates** Repository in deinem GitHub-Konto.
 1. Auf github.com/new ein Repository `weinkeller-daten` anlegen, **Private** auswählen. Nicht das öffentliche Repository der App-Webseite nehmen.
 2. Auf github.com/settings/personal-access-tokens/new einen Schlüssel erstellen: Ablauf 1 Jahr, „Only select repositories“ → `weinkeller-daten`, „Contents: Read and write“.

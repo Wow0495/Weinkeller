@@ -88,6 +88,18 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 50
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "ts": {
+                  "type": "object",
+                  "description": "Änderungszeit je Feld (name, rows, cols) für den feldgenauen Geräte-Abgleich",
+                  "additionalProperties": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
                 }
               }
             }
@@ -417,6 +429,10 @@
         "vivinoUrl": {
           "type": "string",
           "pattern": "^(https://(www\\.)?vivino\\.com/.*)?$"
+        },
+        "ean": {
+          "type": "string",
+          "description": "Barcode (EAN/UPC), falls erfasst – zum Wiedererkennen eigener Weine"
         }
       }
     }

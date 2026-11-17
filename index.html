@@ -124,6 +124,26 @@ svg { flex-shrink: 0; }
 .steps { padding-left: 1.2rem; } .steps li { margin: .35rem 0; }
 code.k { background: var(--surface-3); padding: .05rem .35rem; border-radius: 4px; font-size: .9em; }
 
+/* Lager & Regale */
+.store .store-head { margin-bottom: .5rem; }
+.store .store-name { flex: 1; min-width: 10rem; font-family: var(--serif); font-size: 1.25rem; font-weight: 600; color: var(--accent); }
+.zone { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--line-soft); padding: .75rem 0; }
+.zone-fields { flex: 1 1 260px; min-width: 0; }
+.zone-fields label { margin-top: 0; }
+.zone-prev { padding: .5rem; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line-soft); }
+.stepper { display: flex; align-items: center; gap: .3rem; }
+.stepper .sl { font-size: .85rem; font-weight: 600; margin-right: .2rem; }
+.stepper input { width: 4.2rem; text-align: center; padding: .4rem; }
+.stepper button { min-width: 40px; padding: 0; font-size: 1.1rem; }
+
+/* Schnell erfassen */
+.quick { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: .25rem 1rem 1rem; margin: .5rem 0 1rem; }
+.quick-btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+.quick-btns > * { flex: 1 1 auto; }
+.quick label.btn { margin: 0; font-size: 1rem; }
+#q-raw pre { white-space: pre-wrap; font-size: .8rem; background: var(--surface); padding: .5rem; border-radius: 8px; max-height: 12rem; overflow: auto; }
+.auto { background: var(--sb-bald) !important; border-color: var(--s-bald) !important; }
+
 /* Kopfzeile */
 header.top {
   position: sticky; top: 0; z-index: 10; background: var(--bg);
@@ -513,6 +533,7 @@ function emptyWine() {
     // v2: Vivino (manuell gepflegt, siehe Kommentar bei vivinoSearchUrl)
     vivinoRating: null,    // Community-Durchschnitt 1,0–5,0
     vivinoUrl: '',         // Link zur Vivino-Seite des Weins
+    ean: '',               // Barcode (EAN), falls per Scan/Nachschlagen erfasst – zum Wiedererkennen
     isDemo: false
   };
 }
@@ -1149,8 +1170,23 @@ function mergeSync(local, remote) {
     const ex = locs.get(l.id);
     if (!ex) { locs.set(l.id, deepClone(l)); continue; }
     // gleiche ID: zuletzt geänderte Fassung (Name, Reihen, Fächer) gewinnt, Regale werden vereinigt
+    // gleiche ID: Name des Lagers aus der zuletzt umbenannten Fassung; Regale einzeln nach ihrer letzten Änderung
     const newer = String(l.updatedAt || '') > String(ex.updatedAt || '') ? deepClone(l) : ex, older = newer === ex ? l : ex;
-    for (const z of older.zones) if (!newer.zones.find(y => y.id === z.id)) newer.zones.push(deepClone(z));
+    for (const z of older.zones) {
+      const i = newer.zones.findIndex(y => y.id === z.id);
+      if (i < 0) { newer.zones.push(deepClone(z)); continue; }
+      // feldgenau: Name, Reihen und Fächer einzeln nach ihrem letzten Änderungszeitpunkt (z.ts)
+      const a = newer.zones[i], m = deepClone(a); m.ts = { ...(a.ts || {}) };
+      for (const k of ['name', 'rows', 'cols']) {
+        // Feldzeit; ältere Daten ohne ts zählen mit ihrem updatedAt
+        const fa = a.ts ? a.ts[k] : a.updatedAt, fb = z.ts ? z.ts[k] : z.updatedAt;
+        const ta = String(fa || ''), tb = String(fb || '');
+        if (tb > ta || (tb === ta && String(z[k]) > String(a[k]))) { m[k] = z[k]; if (fb) m.ts[k] = fb; else delete m.ts[k]; }
+        else if (fa) m.ts[k] = fa;
+      }
+      m.updatedAt = [a.updatedAt, z.updatedAt].filter(Boolean).sort().at(-1);
+      newer.zones[i] = m;
+    }
     locs.set(l.id, newer);
   }
   out.locations = [...locs.values()].map(l => ({ ...l, zones: l.zones.filter(z => !gone(z.id)) })).filter(l => l.zones.length);
@@ -1604,6 +1640,280 @@ const Sync = {
 };
 
 /* =========================================================================
+   6b. LOGIC – Etikett-Erkennung (kostenlos, ohne KI)
+   -------------------------------------------------------------------------
+   parseLabelText(text, lines?) wertet erkannten oder eingefügten Etikett-
+   Text aus und liefert Vorschläge für die Formularfelder. Grundlage sind
+   feste Muster (Jahrgang, % vol, Füllmenge) und Wörterbücher (Rebsorten,
+   Regionen, Herkunftsbezeichnungen, Qualitätsstufen, Weingut-Präfixe).
+   Alles hier ist bewusst nachvollziehbar und leicht erweiterbar:
+   einfach Einträge in den Listen ergänzen.
+   Ergebnis: { fields: {name, producer, vintage, type, grapes[], country,
+               region, appellation, classification, abv, bottleSize},
+               found: [kurze Beschreibung je Treffer] }
+   ========================================================================= */
+
+/** Rebsorten: [Anzeigename, Weintyp, ...Schreibweisen auf Etiketten] */
+const LABEL_GRAPES = [
+  ['Cabernet Sauvignon', 'rot'], ['Cabernet Franc', 'rot'], ['Merlot', 'rot'], ['Pinot Noir', 'rot', 'pinot nero'],
+  ['Spätburgunder', 'rot', 'blauburgunder'], ['Frühburgunder', 'rot'], ['Syrah', 'rot', 'shiraz'],
+  ['Grenache', 'rot', 'garnacha', 'cannonau'], ['Tempranillo', 'rot', 'tinta roriz', 'tinto fino', 'tinta de toro'],
+  ['Sangiovese', 'rot'], ['Nebbiolo', 'rot'], ['Barbera', 'rot'], ['Dolcetto', 'rot'], ['Primitivo', 'rot'], ['Zinfandel', 'rot'],
+  ['Malbec', 'rot'], ['Carménère', 'rot'], ['Mourvèdre', 'rot', 'monastrell', 'mataro'], ['Carignan', 'rot', 'carignano', 'cariñena'],
+  ['Cinsault', 'rot'], ['Gamay', 'rot'], ['Blaufränkisch', 'rot', 'lemberger', 'kékfrankos'], ['Zweigelt', 'rot'], ['St. Laurent', 'rot', 'sankt laurent', 'saint laurent'],
+  ['Dornfelder', 'rot'], ['Trollinger', 'rot'], ['Portugieser', 'rot'], ['Regent', 'rot'], ['Schwarzriesling', 'rot', 'pinot meunier', 'meunier'],
+  ['Touriga Nacional', 'rot'], ['Aglianico', 'rot'], ["Nero d'Avola", 'rot', 'nero d avola'], ['Negroamaro', 'rot'], ['Corvina', 'rot'],
+  ['Pinotage', 'rot'], ['Graciano', 'rot'], ['Mazuelo', 'rot', 'mazuelo'], ['Mencía', 'rot'], ['Tannat', 'rot'], ['Petit Verdot', 'rot'], ['Nerello Mascalese', 'rot'], ['Lagrein', 'rot'], ['Montepulciano', 'rot'],
+  ['Welschriesling', 'weiss'], ['Riesling', 'weiss'], ['Chardonnay', 'weiss'], ['Sauvignon Blanc', 'weiss', 'sauvignon'],
+  ['Grüner Veltliner', 'weiss', 'gruner veltliner', 'veltliner'], ['Roter Veltliner', 'weiss'],
+  ['Weißburgunder', 'weiss', 'weissburgunder', 'pinot blanc', 'pinot bianco'], ['Grauburgunder', 'weiss', 'pinot gris', 'pinot grigio', 'ruländer'],
+  ['Silvaner', 'weiss', 'sylvaner'], ['Müller-Thurgau', 'weiss', 'muller thurgau', 'rivaner'], ['Gewürztraminer', 'weiss', 'traminer'],
+  ['Gelber Muskateller', 'weiss'], ['Muskateller', 'weiss', 'muscat', 'moscato', 'moscatel'], ['Scheurebe', 'weiss'], ['Kerner', 'weiss'],
+  ['Chenin Blanc', 'weiss', 'chenin'], ['Viognier', 'weiss'], ['Sémillon', 'weiss'], ['Albariño', 'weiss', 'alvarinho'], ['Verdejo', 'weiss'],
+  ['Vermentino', 'weiss'], ['Garganega', 'weiss'], ['Trebbiano', 'weiss'], ['Glera', 'weiss'], ['Furmint', 'weiss'], ['Godello', 'weiss'],
+  ['Roussanne', 'weiss'], ['Marsanne', 'weiss'], ['Neuburger', 'weiss'], ['Melon de Bourgogne', 'weiss'], ['Fiano', 'weiss'],
+  ['Arneis', 'weiss'], ['Cortese', 'weiss'], ['Torrontés', 'weiss'], ['Assyrtiko', 'weiss'], ['Solaris', 'weiss'], ['Johanniter', 'weiss']
+];
+
+/** Herkunftsbezeichnungen: [Bezeichnung, Region, Land, Typ-Hinweis, Rebsorten-Hinweis] */
+const LABEL_APPELLATIONS = [
+  ['Barolo', 'Piemont', 'Italien', 'rot', 'Nebbiolo'], ['Barbaresco', 'Piemont', 'Italien', 'rot', 'Nebbiolo'],
+  ['Chianti Classico', 'Toskana', 'Italien', 'rot', 'Sangiovese'], ['Chianti', 'Toskana', 'Italien', 'rot', 'Sangiovese'],
+  ['Brunello di Montalcino', 'Toskana', 'Italien', 'rot', 'Sangiovese'], ['Vino Nobile di Montepulciano', 'Toskana', 'Italien', 'rot', 'Sangiovese'],
+  ['Bolgheri', 'Toskana', 'Italien', 'rot', ''], ["Montepulciano d'Abruzzo", 'Abruzzen', 'Italien', 'rot', 'Montepulciano'],
+  ['Amarone della Valpolicella', 'Venetien', 'Italien', 'rot', 'Corvina'], ['Valpolicella', 'Venetien', 'Italien', 'rot', 'Corvina'],
+  ['Soave', 'Venetien', 'Italien', 'weiss', 'Garganega'], ['Prosecco', 'Venetien', 'Italien', 'schaum', 'Glera'],
+  ['Franciacorta', 'Lombardei', 'Italien', 'schaum', ''], ['Etna', 'Sizilien', 'Italien', '', ''], ['Gavi', 'Piemont', 'Italien', 'weiss', 'Cortese'],
+  ['Pauillac', 'Bordeaux', 'Frankreich', 'rot', ''], ['Margaux', 'Bordeaux', 'Frankreich', 'rot', ''], ['Saint-Julien', 'Bordeaux', 'Frankreich', 'rot', ''],
+  ['Saint-Estèphe', 'Bordeaux', 'Frankreich', 'rot', ''], ['Saint-Émilion', 'Bordeaux', 'Frankreich', 'rot', ''], ['Pomerol', 'Bordeaux', 'Frankreich', 'rot', 'Merlot'],
+  ['Pessac-Léognan', 'Bordeaux', 'Frankreich', '', ''], ['Haut-Médoc', 'Bordeaux', 'Frankreich', 'rot', ''], ['Médoc', 'Bordeaux', 'Frankreich', 'rot', ''],
+  ['Sauternes', 'Bordeaux', 'Frankreich', 'suess', 'Sémillon'], ['Chablis', 'Burgund', 'Frankreich', 'weiss', 'Chardonnay'],
+  ['Meursault', 'Burgund', 'Frankreich', 'weiss', 'Chardonnay'], ['Puligny-Montrachet', 'Burgund', 'Frankreich', 'weiss', 'Chardonnay'],
+  ['Gevrey-Chambertin', 'Burgund', 'Frankreich', 'rot', 'Pinot Noir'], ['Nuits-Saint-Georges', 'Burgund', 'Frankreich', 'rot', 'Pinot Noir'],
+  ['Pommard', 'Burgund', 'Frankreich', 'rot', 'Pinot Noir'], ['Volnay', 'Burgund', 'Frankreich', 'rot', 'Pinot Noir'],
+  ['Châteauneuf-du-Pape', 'Rhône', 'Frankreich', '', ''], ['Côte-Rôtie', 'Rhône', 'Frankreich', 'rot', 'Syrah'], ['Crozes-Hermitage', 'Rhône', 'Frankreich', '', 'Syrah'],
+  ['Hermitage', 'Rhône', 'Frankreich', '', 'Syrah'], ['Gigondas', 'Rhône', 'Frankreich', 'rot', 'Grenache'], ['Sancerre', 'Loire', 'Frankreich', '', 'Sauvignon Blanc'],
+  ['Pouilly-Fumé', 'Loire', 'Frankreich', 'weiss', 'Sauvignon Blanc'], ['Vouvray', 'Loire', 'Frankreich', 'weiss', 'Chenin Blanc'],
+  ['Muscadet', 'Loire', 'Frankreich', 'weiss', 'Melon de Bourgogne'], ['Champagne', 'Champagne', 'Frankreich', 'schaum', ''],
+  ['Crémant', '', 'Frankreich', 'schaum', ''], ['Beaujolais', 'Beaujolais', 'Frankreich', 'rot', 'Gamay'],
+  ['Ribera del Duero', 'Ribera del Duero', 'Spanien', 'rot', 'Tempranillo'], ['Rioja', 'Rioja', 'Spanien', '', ''], ['Priorat', 'Katalonien', 'Spanien', 'rot', ''],
+  ['Rías Baixas', 'Galicien', 'Spanien', 'weiss', 'Albariño'], ['Rueda', 'Kastilien und León', 'Spanien', 'weiss', 'Verdejo'], ['Cava', '', 'Spanien', 'schaum', ''],
+  ['Jerez', 'Andalusien', 'Spanien', 'likoer', ''], ['Sherry', 'Andalusien', 'Spanien', 'likoer', ''],
+  ['Porto', 'Douro', 'Portugal', 'likoer', ''], ['Port', 'Douro', 'Portugal', 'likoer', ''], ['Madeira', 'Madeira', 'Portugal', 'likoer', ''],
+  ['Vinho Verde', 'Minho', 'Portugal', 'weiss', ''], ['Tokaji', 'Tokaj', 'Ungarn', 'suess', 'Furmint']
+];
+
+/** Regionen: [Name, Land, ...Schreibweisen] */
+const LABEL_REGIONS = [
+  ['Mosel', 'Deutschland'], ['Rheingau', 'Deutschland'], ['Rheinhessen', 'Deutschland'], ['Pfalz', 'Deutschland'], ['Nahe', 'Deutschland'],
+  ['Baden', 'Deutschland'], ['Württemberg', 'Deutschland'], ['Franken', 'Deutschland'], ['Ahr', 'Deutschland'], ['Mittelrhein', 'Deutschland'],
+  ['Saale-Unstrut', 'Deutschland'], ['Sachsen', 'Deutschland'], ['Hessische Bergstraße', 'Deutschland'],
+  ['Wachau', 'Österreich'], ['Kamptal', 'Österreich'], ['Kremstal', 'Österreich'], ['Wagram', 'Österreich'], ['Weinviertel', 'Österreich'],
+  ['Burgenland', 'Österreich'], ['Steiermark', 'Österreich', 'südsteiermark', 'vulkanland'], ['Thermenregion', 'Österreich'], ['Carnuntum', 'Österreich'],
+  ['Bordeaux', 'Frankreich'], ['Burgund', 'Frankreich', 'bourgogne', 'burgundy'], ['Elsass', 'Frankreich', 'alsace'], ['Loire', 'Frankreich', 'val de loire'],
+  ['Rhône', 'Frankreich', 'cotes du rhone', 'côtes du rhône'], ['Provence', 'Frankreich', 'côtes de provence'], ['Languedoc', 'Frankreich'], ['Roussillon', 'Frankreich'],
+  ['Jura', 'Frankreich'], ['Savoie', 'Frankreich'], ['Piemont', 'Italien', 'piemonte'], ['Toskana', 'Italien', 'toscana', 'tuscany'], ['Venetien', 'Italien', 'veneto'],
+  ['Sizilien', 'Italien', 'sicilia', 'sicily'], ['Apulien', 'Italien', 'puglia'], ['Südtirol', 'Italien', 'alto adige'], ['Friaul', 'Italien', 'friuli'],
+  ['Abruzzen', 'Italien', 'abruzzo'], ['Kampanien', 'Italien', 'campania'], ['Sardinien', 'Italien', 'sardegna'], ['Lombardei', 'Italien', 'lombardia'],
+  ['Marken', 'Italien', 'marche'], ['Navarra', 'Spanien'], ['Penedès', 'Spanien', 'penedes'], ['Toro', 'Spanien'], ['La Mancha', 'Spanien'],
+  ['Douro', 'Portugal'], ['Dão', 'Portugal', 'dao'], ['Alentejo', 'Portugal'], ['Napa Valley', 'USA'], ['Sonoma', 'USA'],
+  ['Barossa', 'Australien', 'barossa valley'], ['Marlborough', 'Neuseeland'], ['Mendoza', 'Argentinien'], ['Stellenbosch', 'Südafrika']
+];
+
+/** Länder: [deutscher Name, ...Schreibweisen] */
+const LABEL_COUNTRIES = [
+  ['Deutschland', 'germany', 'deutscher wein', 'deutscher qualitätswein'], ['Frankreich', 'france', 'vin de france'], ['Italien', 'italia', 'italy', "prodotto in italia"],
+  ['Spanien', 'españa', 'espana', 'spain'], ['Österreich', 'osterreich', 'austria', 'österreichischer qualitätswein'], ['Portugal'],
+  ['Schweiz', 'suisse', 'svizzera', 'switzerland'], ['Ungarn', 'hungary', 'magyar'], ['Griechenland', 'greece'], ['USA', 'california', 'united states'],
+  ['Australien', 'australia'], ['Neuseeland', 'new zealand'], ['Südafrika', 'south africa', 'wine of origin'], ['Argentinien', 'argentina'], ['Chile']
+];
+
+/** Qualitätsstufen, die in classification landen (Reihenfolge: spezifisch vor allgemein) */
+const LABEL_CLASSES = [
+  ['VDP.Grosse Lage', /vdp\.?\s*gro(ss|ß)e\s*lage/], ['VDP.GG', /gro(ss|ß)es\s*gew(a|ä)chs|\bgg\b/], ['VDP.Erste Lage', /vdp\.?\s*erste\s*lage|\berste\s*lage\b/],
+  ['VDP.Ortswein', /vdp\.?\s*ortswein|\bortswein\b/], ['VDP.Gutswein', /vdp\.?\s*gutswein|\bgutswein\b/],
+  ['Trockenbeerenauslese', /trockenbeerenauslese/], ['Beerenauslese', /beerenauslese/], ['Eiswein', /eiswein/], ['Auslese', /\bauslese\b/],
+  ['Spätlese', /sp(a|ä)tlese/], ['Kabinett', /\bkabinett\b/], ['Smaragd', /\bsmaragd\b/], ['Federspiel', /\bfederspiel\b/], ['Steinfeder', /\bsteinfeder\b/],
+  ['Grand Cru Classé', /grand\s*cru\s*class(e|é)/], ['Premier Grand Cru Classé', /premier\s*grand\s*cru\s*class(e|é)/], ['Cru Classé', /\bcru\s*class(e|é)/],
+  ['Grand Cru', /grand\s*cru/], ['Premier Cru', /premier\s*cru|1er\s*cru/], ['Gran Reserva', /gran\s*reserva/], ['Reserva', /\breserva\b/],
+  ['Crianza', /\bcrianza\b/], ['Riserva', /\briserva\b/], ['Gran Selezione', /gran\s*selezione/], ['DOCG', /\bd\.?o\.?c\.?g\.?\b|controllata e garantita/],
+  ['DOC', /\bd\.?o\.?c\.?\b|denominazione di origine controllata/], ['IGT', /\bi\.?g\.?t\.?\b|\bigp\b/], ['DOCa', /\bdoca\b|calificada/],
+  ['AOC', /appellation\s+.*\s+contr(o|ô)l(e|é)e|\baop\b|\baoc\b|appellation d.origine prot/], ['Prädikatswein', /pr(a|ä)dikatswein/], ['DAC', /\bdac\b/], ['Qualitätswein', /qualit(a|ä)tswein/]
+];
+
+/** Hinweise auf den Weintyp in verschiedenen Sprachen */
+const LABEL_TYPE_WORDS = [
+  ['schaum', /\b(sekt|winzersekt|champagner?|cr(e|é)mant|cava|prosecco|spumante|franciacorta|schaumwein|sparkling|p(e|é)tillant|brut|extra brut|brut nature|frizzante|pet.?nat|m(e|é)thode traditionnelle|flaschengärung)\b/],
+  ['likoer', /\b(porto|port wine|vintage port|tawny|sherry|jerez|madeira|marsala|lik(o|ö)rwein|vin doux naturel|fortified)\b/],
+  ['suess', /\b(beerenauslese|trockenbeerenauslese|eiswein|sauternes|tokaji|aszú|aszu|moelleux|liquoreux|dessertwein|passito|recioto|vendanges tardives|late harvest|edelsüß)\b/],
+  ['rose', /\b(ros(e|é)|rosato|rosado|weißherbst|weissherbst|blanc de noirs|schillerwein|rotling|clairet)\b/],
+  ['rot', /\b(rotwein|rouge|rosso|tinto|red wine|vino rosso|vin rouge)\b/],
+  ['weiss', /\b(weißwein|weisswein|blanc|bianco|blanco|branco|white wine|vin blanc)\b/]
+];
+
+/** Wörter, die ein Weingut einleiten */
+const PRODUCER_RX = /\b(weingut|weinbau|winzerhof|weingärtner|winzergenossenschaft|winzerkeller|sektkellerei|sekthaus|schloss|château|chateau|domaine|dom\.|clos|maison|tenuta|cantina|cantine|azienda agricola|fattoria|castello|podere|marchesi|bodegas?|quinta|herdade|winery|wine estate|estate|vineyards?|wines)\b/i;
+const BOTTLER_RX = /(?:abgef[uü]llt|erzeugerabf[uü]llung|gutsabf[uü]llung|mis en bouteille|imbottigliato|embotellado|engarrafado|bottled|produced)\s*(?:und\s*vertrieben\s*)?(?:von|by|par|au|à la|al|dal|da|por|durch|for)?\s*[:\-–]?\s*(?<who>.*)/i;
+const LEGAL_RX = /(sulfit|sulphit|solfit|contains|enth(a|ä)lt|contient|contiene|a\.?\s*p\.?\s*nr|l-?\s*\d|lot|www\.|https?:|@|tel\.?|fax|\bvol\b|%|\bml\b|\bcl\b|\d{4,5}\s+[a-zäöü]|germany$|^d-\d{5}|produkt|product of|produce of|prodotto|produit|recycl|pfand|schwanger|pregnan|allerg)/i;
+
+const _n = s => norm(s).replace(/[’'`´]/g, "'").replace(/[^a-z0-9.'\- ]+/g, ' ');
+const _rx = alias => new RegExp(`(^|[^a-z0-9])${_n(alias).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[ -]+/g, '[ -]*')}(?=$|[^a-z0-9])`);
+const _titleCase = s => s.toLowerCase().replace(/(^|[\s\-'’(])([a-zäöüàâçéèêëîïôûùœ])/g, (m, a, b) => a + b.toUpperCase())
+  .replace(/\b(De|Di|Da|Del|Della|Du|Des|La|Le|Les|Y|E|Von|Van|Dei|Al|Sur|En)\b/g, w => w.toLowerCase()).replace(/^./, c => c.toUpperCase());
+const _cleanLine = s => String(s).replace(/[|_~*•·«»"“”„]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+const _niceCase = s => (s === s.toUpperCase() && /[A-ZÄÖÜ]{3}/.test(s)) ? _titleCase(s) : s;
+
+/**
+ * @param {string} text   erkannter oder eingefügter Text
+ * @param {Array<{text:string,height:number}>} [lines] optional: Zeilen mit Schrifthöhe (aus der Texterkennung)
+ */
+function parseLabelText(text, lines) {
+  const raw = String(text || '');
+  let L = (lines && lines.length ? lines : raw.split(/\r?\n/).map(t => ({ text: t, height: 0 })))
+    .map(l => ({ text: _cleanLine(l.text), height: l.height || 0 }))
+    .filter(l => (l.text.match(/[A-Za-zÀ-ÿ]/g) || []).length >= 2 || /\b(19|20)\d\d\b/.test(l.text));
+  const all = _n(L.map(l => l.text).join('\n'));
+  const f = {}, found = [];
+  const set = (k, v, label) => { if (v != null && v !== '' && f[k] == null) { f[k] = v; if (label) found.push(label); } };
+
+  // Jahrgang: Jahreszahl, nicht nach „seit/gegründet/since/depuis/dal/desde“
+  const Y = currentYear();
+  const years = [...raw.matchAll(/(?<pre>seit|since|depuis|dal|desde|gegr[uü]ndet|founded|fond[eé]e?\s+en|fond[eé]e?|est\.?|anno|en)?\s*\b(?<y>19[3-9]\d|20[0-4]\d)\b/gi)]
+    .filter(m => !m.groups.pre).map(m => +m.groups.y).filter(y => y <= Y && y >= 1930);
+  if (years.length) set('vintage', years.sort((a, b) => b - a)[0], `Jahrgang ${years[0]}`);
+
+  // Alkohol: „13,5 % vol“, „alc. 13.5%“
+  const abv = [...raw.matchAll(/(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*(?:vol|alc|alk|v\/v)?/gi)].map(m => toNum(m[1])).find(v => v >= 5 && v <= 23);
+  if (abv != null) set('abv', abv, `${fmtNum.format(abv)} % vol`);
+
+  // Füllmenge → nächstliegende Standardgröße
+  const sm = raw.match(/(\d{2,4})\s*ml\b/i) || raw.match(/(\d{2,3}(?:[.,]\d)?)\s*cl\b/i) || raw.match(/\b(\d(?:[.,]\d{1,3})?)\s*(?:l|ltr|liter|litre)\b/i);
+  if (sm) {
+    let l = toNum(sm[1]); if (/ml/i.test(sm[0])) l /= 1000; else if (/cl/i.test(sm[0])) l /= 100;
+    const best = BOTTLE_SIZES.reduce((a, b) => Math.abs(b - l) < Math.abs(a - l) ? b : a);
+    if (Math.abs(best - l) < 0.06) set('bottleSize', best, fmtSize(best));
+  }
+
+  // Rebsorten (längere Namen zuerst, Treffer werden ausgeblendet, damit „Welschriesling“ nicht auch „Riesling“ ergibt)
+  let rest = ' ' + all + ' ';
+  const grapeHits = [];
+  const aliases = LABEL_GRAPES.flatMap(([name, type, ...al]) => [name, ...al].map(a => ({ a, name, type }))).sort((x, y) => y.a.length - x.a.length);
+  for (const { a, name, type } of aliases) {
+    const rx = _rx(a);
+    if (rx.test(rest)) { if (!grapeHits.find(g => g.name === name)) grapeHits.push({ name, type, pos: rest.search(rx) }); rest = rest.replace(new RegExp(rx.source, 'g'), '$1 '); }
+  }
+  grapeHits.sort((a, b) => a.pos - b.pos);
+
+  // Herkunftsbezeichnung → Region, Land, ggf. Typ und Rebsorte
+  const app = [...LABEL_APPELLATIONS].sort((a, b) => b[0].length - a[0].length).find(([name]) => _rx(name).test(all));
+  if (app) {
+    const [name, region, country, tHint, gHint] = app;
+    set('appellation', name, `Herkunft ${name}`); set('region', region || null); set('country', country);
+    if (gHint && !grapeHits.length) grapeHits.push({ name: gHint, type: tHint || null, hint: true });
+    if (tHint) f._typeHint = tHint;
+  }
+  if (grapeHits.length) set('grapes', grapeHits.map(g => g.name), `Rebsorte ${grapeHits.map(g => g.name).join(', ')}`);
+
+  const reg = LABEL_REGIONS.find(([name, , ...al]) => [name, ...al].some(a => _rx(a).test(all)));
+  if (reg) { set('region', reg[0], f.appellation ? null : `Region ${reg[0]}`); set('country', reg[1]); }
+  const ctry = LABEL_COUNTRIES.find(([name, ...al]) => [name, ...al].some(a => _rx(a).test(all)));
+  if (ctry) set('country', ctry[0]);
+  if (f.country && !found.some(x => x.startsWith('Region') || x.startsWith('Herkunft'))) found.push(`Land ${f.country}`);
+
+  const cls = LABEL_CLASSES.find(([, rx]) => rx.test(all));
+  if (cls) set('classification', cls[0], cls[0]);
+
+  // Weintyp: ausdrückliche Wörter > Herkunft > Rebsorte
+  const tw = LABEL_TYPE_WORDS.find(([, rx]) => rx.test(all));
+  const type = tw ? tw[0] : f._typeHint || (grapeHits[0] && grapeHits[0].type) || null;
+  delete f._typeHint;
+  if (type) set('type', type, `Typ ${WINE_TYPES[type]}`);
+
+  // Weingut: zuerst eine Zeile mit Weingut-Präfix („Weingut X“, „Château X“), sonst die Abfüller-Zeile
+  let producerLine = null;
+  const pl = L.filter(l => PRODUCER_RX.test(l.text) && !LEGAL_RX.test(l.text) && !BOTTLER_RX.test(l.text) && !/(fond(e|é)e?|gegr(u|ü)ndet|since|seit|depuis)/i.test(l.text))
+    .sort((a, b) => b.height - a.height)[0];
+  if (pl) { producerLine = pl; set('producer', _niceCase(pl.text.replace(/[,;].*$/, '').trim()), 'Weingut'); }
+  else for (const l of L) {
+    const m = l.text.match(BOTTLER_RX);
+    const who = m ? (m.groups.who || '').replace(/^(all'origine|à la propriété|a la propriete|in der|im)\s+(da|par|von)?\s*/i, '').trim() : '';
+    const generic = /^(au|à la|a la)?\s*(ch(a|â)teau|domaine|weingut|propri(e|é)t(e|é)|cantina|bodega|origine)?\s*\.?$/i.test(who);
+    if (m && who && !generic && /[A-Za-zÀ-ÿ]{3}/.test(who)) { producerLine = l; set('producer', _niceCase(who.split(/,|\s-\s|\bD-\d|\b\d{5}\b/)[0].trim()), 'Weingut'); break; }
+  }
+
+  // Name: auffälligste (größte) übrige Zeile; ohne Größenangaben die erste passende.
+  // Zeilen, die nur Herkunft/Typ/Rebsorte/Jahrgangswort sind, kommen nur als Notlösung in Frage.
+  const words = l => _n(l.text).trim();
+  const isClassLine = l => LABEL_CLASSES.some(([, rx]) => rx.test(words(l))) && words(l).split(' ').length <= 6;
+  const skip = l => l === producerLine || (PRODUCER_RX.test(l.text) && l.text.split(/\s+/).length <= 6) || LEGAL_RX.test(l.text) || BOTTLER_RX.test(l.text) || /^\s*(19|20)\d\d\s*$/.test(l.text) || isClassLine(l)
+    || /(fond(e|é)e?|gegr(u|ü)ndet|since|seit|depuis)\s/i.test(l.text)
+    || LABEL_COUNTRIES.some(([name, ...al]) => [name, ...al].some(a => words(l) === _n(a).trim()))
+    || (l.text.match(/[A-Za-zÀ-ÿ]/g) || []).length < 3 || l.text.length > 48;
+  const grapeWords = new Set(LABEL_GRAPES.flatMap(([n, , ...al]) => [n, ...al]).flatMap(x => _n(x).trim().split(' ')));
+  const generic = new Set([...LABEL_APPELLATIONS.map(a => _n(a[0]).trim()), ...LABEL_REGIONS.flatMap(([n, , ...al]) => [n, ...al].map(x => _n(x).trim())),
+    'dac', 'brut', 'extra brut', 'trocken', 'halbtrocken', 'feinherb', 'lieblich', 'sec', 'demi sec', 'dry', 'rouge', 'blanc', 'rosso', 'bianco', 'tinto', 'blanco']);
+  const isGeneric = l => {
+    const w = words(l).replace(/\b(cosecha|jahrgang|vintage|mill(e|é)sime|annata|vendemmia|colheita)\b/g, '').replace(/\b(19|20)\d\d\b/g, '').replace(/\s+/g, ' ').trim();
+    return !w || generic.has(w) || w.split(' ').every(x => generic.has(x) || grapeWords.has(x));
+  };
+  const cand = L.filter(l => !skip(l));
+  const order = arr => arr.some(l => l.height) ? [...arr].sort((a, b) => b.height - a.height) : arr;
+  const strong = order(cand.filter(l => !isGeneric(l))), weak = order(cand.filter(isGeneric));
+  const nameLine = strong[0] || weak[0];
+  let name = '';
+  if (nameLine) {
+    name = nameLine.text;
+    // deutsche Lagennamen stehen oft auf zwei Zeilen: „Deidesheimer“ / „Hohenmorgen“
+    const i = L.indexOf(nameLine), next = L[i + 1];
+    if (/er$/i.test(name.trim()) && next && !skip(next) && !isGeneric(next)) name += ' ' + next.text;
+    name = name.replace(/\b(19|20)\d\d\b/g, '').replace(/\s{2,}/g, ' ').trim();
+  }
+  if (name && f.producer && words({ text: name }) === words({ text: f.producer })) name = '';
+  // Château/Domaine o. ä.: ist kein eigener Name zu finden, heißt der Wein wie das Gut
+  if ((!name || !strong.length) && f.producer && /^(ch(a|â)teau|domaine|clos|tenuta|castello|quinta|schloss)\b/i.test(f.producer)) name = f.producer;
+  if (!name) name = f.appellation || (f.grapes ? f.grapes[0] : '');
+  if (name) set('name', _niceCase(name.replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9.)]+$/g, '')), 'Name');
+
+  return { fields: f, found };
+}
+
+/** Füllmenge aus Open Food Facts („75 cl“, „750 ml“, „0,75 l“) */
+function _offSize(q) {
+  const r = parseLabelText(String(q || '').replace(/\s+/g, ' ') + ' ');
+  return r.fields.bottleSize || null;
+}
+const OFF_COUNTRIES = { 'en:france': 'Frankreich', 'en:germany': 'Deutschland', 'en:italy': 'Italien', 'en:spain': 'Spanien', 'en:austria': 'Österreich',
+  'en:portugal': 'Portugal', 'en:switzerland': 'Schweiz', 'en:hungary': 'Ungarn', 'en:greece': 'Griechenland', 'en:united-states': 'USA',
+  'en:australia': 'Australien', 'en:new-zealand': 'Neuseeland', 'en:south-africa': 'Südafrika', 'en:argentina': 'Argentinien', 'en:chile': 'Chile' };
+
+/** Wandelt eine Open-Food-Facts-Antwort in Formularvorschläge um */
+function offToFields(p) {
+  const name = p.product_name_de || p.product_name || p.product_name_fr || p.product_name_it || p.product_name_en || '';
+  const brand = String(p.brands || '').split(',')[0].trim();
+  const text = [name, p.generic_name_de, p.generic_name, brand, (p.labels || ''), (p.categories || ''), p.origins || ''].filter(Boolean).join('\n');
+  const parsed = parseLabelText(text);
+  const f = parsed.fields, found = ['Datenbank: Open Food Facts'];
+  if (name) { f.name = _niceCase(name.replace(new RegExp(brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').replace(/\b(19|20)\d\d\b/, '').trim() || name); found.push('Name'); }
+  if (brand) { f.producer = _niceCase(brand); found.push('Weingut'); }
+  const size = _offSize(p.quantity); if (size) { f.bottleSize = size; found.push(fmtSize(size)); }
+  const cats = (p.categories_tags || []).join(' ');
+  const t = /sparkling|champagne|cremant|prosecco|cava|sekt/.test(cats) ? 'schaum' : /rose-wine|rosé/.test(cats) ? 'rose' : /red-wine/.test(cats) ? 'rot'
+    : /white-wine/.test(cats) ? 'weiss' : /dessert-wine|sweet-wine/.test(cats) ? 'suess' : /fortified|port|sherry/.test(cats) ? 'likoer' : null;
+  if (t) f.type = t;
+  const c = (p.countries_tags || []).map(x => OFF_COUNTRIES[x]).find(Boolean); if (c && !f.country) f.country = c;
+  const alc = p.nutriments && (p.nutriments.alcohol_value ?? p.nutriments.alcohol ?? p.nutriments.alcohol_100g);
+  if (alc != null && +alc >= 5 && +alc <= 23) { f.abv = +alc; found.push(`${fmtNum.format(+alc)} % vol`); }
+  return { fields: f, found: [...new Set([...found, ...parsed.found])] };
+}
+
+/** Eigene Weine, die zum erkannten Wein passen (gleicher Barcode oder gleiches Weingut + Name) */
+function findOwnMatches(state, { ean, name, producer }) {
+  const nn = _n(name || '').trim(), np = _n(producer || '').trim();
+  return state.wines.filter(w => (ean && w.ean && w.ean === ean)
+    || (nn && np && _n(w.name).trim() === nn && _n(w.producer).trim() === np));
+}
+
+/* =========================================================================
    8. UI
    Einfache Ansichten als HTML-Strings + Event-Delegation. Kein Framework:
    eine Datei, keine Abhängigkeiten, läuft auch per Doppelklick.
@@ -1619,6 +1929,7 @@ const ICON = {
   pin: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>',
   search: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   glass: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2h8l-1 7a3 3 0 0 1-6 0z"/><path d="M12 12v8"/><path d="M8 21h8"/></svg>',
+  camera: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   disk: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>'
 };
 const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
@@ -1820,7 +2131,7 @@ function viewOverview() {
       <div class="list" aria-labelledby="h-now">${now.length ? now.map(w => UI.wineCard(w)).join('') : '<p class="empty card">Nichts Dringendes – alle Weine sind im grünen oder blauen Bereich.</p>'}</div>
     </div>
     <aside class="ov-side" aria-label="Lager und Entdeckungen">
-      <div class="sh"><h2>Lagerplan</h2></div>
+      <div class="sh"><h2>Lagerplan</h2><a href="#/lagerorte">Bearbeiten</a></div>
       ${planTeaser()}
       <div class="ext-row">
         <span style="color:var(--accent)">${ICON.glass}</span>
@@ -1875,7 +2186,7 @@ function planTeaser() {
 
 /** Volle Lagerplan-Seite */
 function viewPlanPage() {
-  return `<p><a href="#/uebersicht">← Übersicht</a></p><h1>Lagerplan</h1><div class="card">${viewPlan()}</div>`;
+  return `<p><a href="#/uebersicht">← Übersicht</a></p><div class="row" style="align-items:baseline"><h1 style="flex:1">Lagerplan</h1><a class="btn sm" href="#/lagerorte">Lager &amp; Regale bearbeiten</a></div><div class="card">${viewPlan()}</div>`;
 }
 
 /** Lagerplan: ein Regal als Raster Reihe × Fach */
@@ -1999,7 +2310,9 @@ function viewForm(mode, id, query) {
   ${mode === 'adopt' ? `<p class="muted">Schön, dass er es in deinen Keller geschafft hat! Bitte Menge und Lagerplatz angeben. Notizen und Bewertungen bleiben erhalten.</p>` : ''}
   ${mode === 'dup' ? `<p class="muted">Vorlage: ${esc(Store.wine(id).name)} ${esc(UI.vintage(Store.wine(id)))}. Bitte den neuen Jahrgang eintragen.</p>` : ''}
   <form id="wine-form" class="form-wrap" novalidate>
+    <input type="hidden" name="ean" value="${esc(w.ean || '')}">
     <div id="form-errors"></div>
+    ${mode === 'new' || mode === 'dup' ? quickPanel(w) : ''}
     ${canToggle ? `<div class="seg" role="radiogroup" aria-label="Herkunft">
       <label><input type="radio" name="origin" value="keller" ${w.origin !== 'extern' ? 'checked' : ''}> Für meinen Keller</label>
       <label><input type="radio" name="origin" value="extern" ${w.origin === 'extern' ? 'checked' : ''}> Woanders getrunken</label>
@@ -2113,6 +2426,119 @@ function placementsEditor(w, isNew) {
     <p class="small muted" style="margin-bottom:0">Reihe/Fach leer lassen, wenn es keinen festen Platz gibt (z. B. „Kühlschrank“).</p>`;
 }
 
+/* =========================================================================
+   SCHNELL ERFASSEN: Etikett-Foto (Texterkennung im Browser), eingefügter
+   Text, Barcode (Open Food Facts). Füllt nur leere Felder und markiert sie.
+   Texterkennung: Tesseract.js (Apache-2.0), wird beim ersten Gebrauch von
+   cdn.jsdelivr.net geladen und danach vom Browser/Service Worker gecacht.
+   Das Foto selbst verlässt das Gerät nicht.
+   ========================================================================= */
+const OCR = {
+  SRC: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+  LANGS: 'deu+eng+fra',
+  load() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = this.SRC; s.async = true; s.crossOrigin = 'anonymous';
+      const t = setTimeout(() => rej(new Error('timeout')), 30000);
+      s.onload = () => { clearTimeout(t); window.Tesseract ? res(window.Tesseract) : rej(new Error('missing')); };
+      s.onerror = () => { clearTimeout(t); rej(new Error('network')); };
+      document.head.appendChild(s);
+    });
+  },
+  /** Bild verkleinern, in Graustufen wandeln, Kontrast anheben (verbessert die Erkennung) */
+  async prepare(file, invert = false) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Bild konnte nicht gelesen werden.')); i.src = url; });
+      const sc = Math.min(1, 1800 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas'); c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0, c.width, c.height);
+      const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+      for (let i = 0; i < px.length; i += 4) {
+        let v = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        v = Math.max(0, Math.min(255, (v - 128) * 1.5 + 128));   // Kontrast
+        if (invert) v = 255 - v;                                   // helle Schrift auf dunklem Etikett
+        px[i] = px[i + 1] = px[i + 2] = v;
+      }
+      g.putImageData(d, 0, 0);
+      return c;
+    } finally { URL.revokeObjectURL(url); }
+  },
+  async read(file, onProgress) {
+    onProgress('Lade Texterkennung … (beim ersten Mal ca. 10 MB)');
+    let T;
+    try { T = await this.load(); }
+    catch { throw new Error('Die Texterkennung konnte nicht geladen werden. Beim ersten Mal ist Internet nötig. Alternativ: Text mit Live Text (iPhone) oder Google Lens (Android) kopieren und „Text einfügen“ nutzen.'); }
+    const worker = await T.createWorker(this.LANGS, 1, {
+      logger: m => { if (m.status === 'recognizing text') onProgress(`Erkenne Text … ${Math.round((m.progress || 0) * 100)} %`); else if (/load|initializ/i.test(m.status || '')) onProgress('Bereite Texterkennung vor …'); }
+    });
+    try {
+      const pick = r => ({ text: r.data.text || '', lines: (r.data.lines || []).map(l => ({ text: l.text, height: l.bbox ? l.bbox.y1 - l.bbox.y0 : 0 })), conf: r.data.confidence || 0 });
+      let best = pick(await worker.recognize(await this.prepare(file)));
+      const letters = s => (s.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+      if (letters(best.text) < 25) {           // kaum Text? Vielleicht helle Schrift auf dunklem Grund
+        onProgress('Versuche es mit umgekehrten Farben …');
+        const inv = pick(await worker.recognize(await this.prepare(file, true)));
+        if (letters(inv.text) > letters(best.text)) best = inv;
+      }
+      return best;
+    } finally { await worker.terminate(); }
+  }
+};
+
+/** Barcode in einem Foto finden (nur wo der Browser das kann, z. B. Chrome auf Android) */
+async function detectBarcode(file) {
+  if (!('BarcodeDetector' in window)) return null;
+  try {
+    const det = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e'] });
+    const codes = await det.detect(await createImageBitmap(file));
+    return codes[0] ? codes[0].rawValue : null;
+  } catch { return null; }
+}
+
+/** Open Food Facts nach einem Barcode fragen */
+async function lookupBarcode(code) {
+  const fields = 'product_name,product_name_de,product_name_fr,product_name_it,product_name_en,generic_name,generic_name_de,brands,quantity,countries_tags,origins,categories,categories_tags,labels,nutriments';
+  let r;
+  try { r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=${fields}`); }
+  catch { throw new Error('Keine Verbindung zur Datenbank (offline?).'); }
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`Die Datenbank meldet Fehler ${r.status}.`);
+  const j = await r.json();
+  return j.status === 1 && j.product ? j.product : null;
+}
+
+function quickPanel(w) {
+  const bc = 'BarcodeDetector' in window;
+  return `<section class="quick" aria-labelledby="h-quick">
+    <div class="sh" style="margin-top:.25rem"><h2 id="h-quick">Schnell erfassen</h2></div>
+    <div class="quick-btns">
+      <label class="btn primary" for="q-photo">${ICON.camera} Etikett fotografieren</label>
+      <input id="q-photo" class="sr-only" type="file" accept="image/*" capture="environment">
+      <button type="button" data-act="q-paste" aria-controls="q-paste-box" aria-expanded="false">Text einfügen</button>
+      <button type="button" data-act="q-barcode" aria-controls="q-barcode-box" aria-expanded="false">Barcode</button>
+    </div>
+    <div id="q-paste-box" class="hidden">
+      <label for="q-text">Text vom Etikett</label>
+      <textarea id="q-text" placeholder="Hier einfügen – z. B. am iPhone mit Live Text oder bei Android mit Google Lens aus dem Foto kopiert"></textarea>
+      <button type="button" class="primary sm" data-act="q-parse" style="margin-top:.5rem">Auswerten</button>
+    </div>
+    <div id="q-barcode-box" class="hidden">
+      <label for="q-ean">Barcode-Nummer</label>
+      <div class="row"><input id="q-ean" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="z. B. 3185370000335" style="flex:1;min-width:10rem" value="${esc(w.ean || '')}">
+        <button type="button" class="primary sm" data-act="q-lookup">Nachschlagen</button>
+        ${bc ? `<label class="btn sm" for="q-bc-photo">${ICON.camera} Barcode fotografieren</label><input id="q-bc-photo" class="sr-only" type="file" accept="image/*" capture="environment">` : ''}</div>
+      <p class="small muted">Die 8- bis 13-stellige Zahl unter den Strichen. Gesucht wird in der freien Datenbank Open Food Facts – dort stehen vor allem Supermarkt-Weine, Winzerweine fehlen oft.</p>
+    </div>
+    <div id="q-status" role="status" aria-live="polite"></div>
+    <div id="q-own"></div>
+    <details id="q-raw" class="hidden"><summary>Erkannter Text</summary><pre></pre></details>
+    <p class="small muted" style="margin-bottom:0">Gelb markierte Felder wurden erkannt – bitte kurz prüfen. Was du selbst eingetragen hast, wird nie überschrieben. Das Foto bleibt auf deinem Gerät.</p>
+  </section>`;
+}
+
 /** Liest das Formular in ein Wein-Objekt */
 function readForm(form, base) {
   const fd = new FormData(form), g = k => (fd.get(k) ?? '').toString().trim();
@@ -2126,7 +2552,7 @@ function readForm(form, base) {
     tags: splitList(g('tags')), notes: g('notes'), rating: UI.formWine.rating, photo: UI.formWine.photo,
     placements: UI.formWine.placements.map(p => ({ ...p })), updatedAt: new Date().toISOString(),
     origin: form.querySelector('[name=origin]:checked')?.value || base.origin,
-    externalPlace: g('externalPlace'), vivinoRating: toNum(g('vivinoRating')), vivinoUrl: g('vivinoUrl'),
+    externalPlace: g('externalPlace'), vivinoRating: toNum(g('vivinoRating')), vivinoUrl: g('vivinoUrl'), ean: g('ean'),
     wishlist: [...form.querySelectorAll('[name=wishlist]')].some(c => c.checked && !c.closest('.hidden'))
   });
   return w;
@@ -2369,20 +2795,9 @@ function viewData() {
       <li>Dauerhafter Speicher: <strong>${Store.persisted === true ? 'aktiv – der Browser löscht nicht von selbst' : Store.persisted === false ? 'nicht gewährt – bei Speicherknappheit könnte der Browser aufräumen' : 'unbekannt'}</strong>.${isFile ? '' : ' Als installierte App (Homescreen) ist der Schutz am besten.'}</li>
     </ul>
   </section>
-  <section class="card">
-    <h2 style="margin-top:0">Lagerorte</h2>
-    <p class="small muted">Lager (z. B. Keller) → Regal/Zone mit Reihen × Fächern. Wird für Lagerplan und Eingabe genutzt.</p>
-    ${s.locations.map(l => `<fieldset><legend>${esc(l.name)}</legend>
-      <div class="row"><label class="sr-only" for="ln-${l.id}">Name des Lagers</label><input id="ln-${l.id}" data-loc-name="${l.id}" value="${esc(l.name)}" style="flex:1">
-      <button class="sm danger" data-act="loc-del" data-loc="${l.id}" aria-label="Lager ${esc(l.name)} löschen">Löschen</button></div>
-      <table class="simple"><thead><tr><th>Regal/Zone</th><th>Reihen</th><th>Fächer</th><th></th></tr></thead><tbody>
-      ${l.zones.map(z => `<tr><td><input aria-label="Name" data-zone="${l.id}|${z.id}" data-k="name" value="${esc(z.name)}"></td>
-        <td><input aria-label="Reihen" data-zone="${l.id}|${z.id}" data-k="rows" inputmode="numeric" value="${z.rows}" style="width:4.5rem"></td>
-        <td><input aria-label="Fächer" data-zone="${l.id}|${z.id}" data-k="cols" inputmode="numeric" value="${z.cols}" style="width:4.5rem"></td>
-        <td><button class="sm ghost" data-act="zone-del" data-zone="${l.id}|${z.id}" aria-label="Regal ${esc(z.name)} löschen">✕</button></td></tr>`).join('')}
-      </tbody></table>
-      <button class="sm" data-act="zone-add" data-loc="${l.id}" style="margin-top:.5rem">+ Regal/Zone</button></fieldset>`).join('')}
-    <button data-act="loc-add">+ Lager hinzufügen</button>
+  <section class="card row">
+    <div style="flex:1;min-width:12rem"><h2 style="margin:0 0 .25rem">Lager &amp; Regale</h2><span class="small muted">${s.locations.length} Lager, ${s.locations.reduce((a, l) => a + l.zones.length, 0)} Regale/Zonen</span></div>
+    <a class="btn" href="#/lagerorte">Bearbeiten</a>
   </section>
   <section class="card">
     <h2 style="margin-top:0">Darstellung</h2>
@@ -2398,6 +2813,50 @@ function viewData() {
     </div>
   </section>
   <p class="small muted">Weinkeller · Datenformat Version ${SCHEMA_VERSION} · ${s.wines.length} Einträge</p>`;
+}
+
+/* =========================================================================
+   LAGER & REGALE – Lager (Keller, Kühlschrank …) und ihre Regale/Zonen
+   Jede Änderung wird sofort gespeichert und per Sync an andere Geräte
+   übertragen (updatedAt an Lager bzw. Regal entscheidet bei Konflikten).
+   ========================================================================= */
+function viewStorage() {
+  const s = Store.state;
+  const bottles = (lid, zid) => s.wines.filter(w => w.origin !== 'extern' && quantity(w) > 0)
+    .reduce((a, w) => a + w.placements.filter(p => p.locationId === lid && (!zid || p.zoneId === zid)).reduce((b, p) => b + p.count, 0), 0);
+  const stepper = (l, z, k, label) => `<div class="stepper"><span class="sl" id="lbl-${k}-${z.id}">${label}</span>
+      <button type="button" class="sm" data-act="zone-step" data-zone="${l.id}|${z.id}" data-k="${k}" data-d="-1" aria-label="${label} verringern">−</button>
+      <input type="number" min="1" max="50" inputmode="numeric" aria-labelledby="lbl-${k}-${z.id}" data-zone="${l.id}|${z.id}" data-k="${k}" value="${z[k]}">
+      <button type="button" class="sm" data-act="zone-step" data-zone="${l.id}|${z.id}" data-k="${k}" data-d="1" aria-label="${label} erhöhen">+</button></div>`;
+  return `<p><a href="#/lagerplan">← Lagerplan</a></p>
+  <h1>Lager &amp; Regale</h1>
+  <p class="muted" style="margin-top:0">Hier legst du fest, wo deine Flaschen liegen: <strong>Lager</strong> (z. B. Keller, Weinkühlschrank) und darin <strong>Regale oder Zonen</strong> mit Reihen × Fächern. Änderungen werden sofort gespeichert${Sync.on ? ' und auf alle verbundenen Geräte übertragen' : ''}.</p>
+  ${s.locations.map(l => `<section class="card store" aria-label="Lager ${esc(l.name)}">
+    <div class="row store-head">
+      <label for="ln-${l.id}" class="sr-only">Name des Lagers</label>
+      <input id="ln-${l.id}" class="store-name" data-loc-name="${l.id}" value="${esc(l.name)}">
+      <span class="small muted">${bottles(l.id)} Fl.</span>
+      <button class="sm danger" data-act="loc-del" data-loc="${l.id}" aria-label="Lager ${esc(l.name)} löschen">Löschen</button>
+    </div>
+    ${l.zones.map(z => {
+      const occ = zoneOccupancy(s, l.id, z.id), R = Math.min(z.rows, 12), C = Math.min(z.cols, 16);
+      let dots = '';
+      for (let r = 1; r <= R; r++) for (let c = 1; c <= C; c++) { const it = occ.cells[`${r}-${c}`]; dots += it ? `<i class="o s-${it.map(x => maturity(x.w)).sort((a, b) => b.score - a.score)[0].key}"></i>` : '<i></i>'; }
+      return `<div class="zone">
+        <div class="zone-fields">
+          <label for="zn-${z.id}">Regal / Zone</label>
+          <input id="zn-${z.id}" data-zone="${l.id}|${z.id}" data-k="name" value="${esc(z.name)}">
+          <div class="row" style="gap:1rem;margin-top:.5rem">${stepper(l, z, 'rows', 'Reihen')}${stepper(l, z, 'cols', 'Fächer')}</div>
+          <div class="row small muted" style="margin-top:.5rem">${z.rows * z.cols} Fächer · ${bottles(l.id, z.id)} Flaschen · ${occ.free} frei
+            <span class="spacer"></span><button class="sm ghost" data-act="zone-del" data-zone="${l.id}|${z.id}">Regal entfernen</button></div>
+        </div>
+        <a class="zone-prev" href="#/lagerplan" data-act="plan-zone" data-zone="${l.id}|${z.id}" aria-label="Lagerplan ${esc(l.name)} ${esc(z.name)} öffnen">
+          <span class="minigrid" style="grid-template-columns:repeat(${C}, 9px)" aria-hidden="true">${dots}</span></a>
+      </div>`; }).join('')}
+    <button class="sm" data-act="zone-add" data-loc="${l.id}">+ Regal / Zone hinzufügen</button>
+  </section>`).join('')}
+  <button class="primary" data-act="loc-add" style="margin-top:1rem">+ Neues Lager</button>
+  <p class="small muted">Beispiele: „Keller“ mit „Regal A“ (6 Reihen × 8 Fächer) · „Weinkühlschrank“ mit „Böden“ (5 × 6) · „Kühlschrank Küche“ mit „Tür“ (1 × 4). Verkleinern oder Löschen geht nur, solange dort keine Flaschen liegen.</p>`;
 }
 
 function notFound() { return `<h1>Nicht gefunden</h1><p>Diesen Wein gibt es nicht (mehr). <a href="#/keller">Zum Keller</a></p>`; }
@@ -2425,17 +2884,18 @@ function render() {
     case 'wein': html = viewDetail(r.id); break;
     case 'daten': html = viewData(); break;
     case 'lagerplan': html = viewPlanPage(); break;
+    case 'lagerorte': html = viewStorage(); break;
     default: html = viewOverview(); r.name = 'uebersicht';
   }
   m.innerHTML = html;
   $$('nav.tabs a').forEach(a => a.toggleAttribute('aria-current', false));
-  const nav = { uebersicht: 'uebersicht', keller: 'keller', wein: 'keller', neu: 'neu', bearbeiten: 'keller', duplizieren: 'neu', einlagern: 'keller', lagerplan: 'keller' }[r.name];
+  const nav = { uebersicht: 'uebersicht', keller: 'keller', wein: 'keller', neu: 'neu', bearbeiten: 'keller', duplizieren: 'neu', einlagern: 'keller', lagerplan: 'keller', lagerorte: 'keller' }[r.name];
   // Kopfzeile: auf der Übersicht Monat/Jahr, sonst Markenname
   const crumb = $('#crumb'); crumb.textContent = r.name === 'uebersicht' ? monthYear() : 'Mein Weinkeller'; crumb.classList.toggle('brand', r.name !== 'uebersicht');
   $('#side-date').textContent = monthYear();
   const lb = Store.state.meta.lastBackupAt; $('#side-backup').textContent = lb ? `Letztes Backup: ${fmtDate(lb)}` : 'Noch kein Backup';
   if (nav) $(`nav.tabs a[data-nav="${nav}"]`).setAttribute('aria-current', 'page');
-  document.title = { uebersicht: 'Übersicht', keller: 'Keller', neu: 'Neuer Wein', wein: 'Wein', bearbeiten: 'Bearbeiten', duplizieren: 'Duplizieren', einlagern: 'In den Keller übernehmen', daten: 'Daten & Backup', lagerplan: 'Lagerplan' }[r.name] + ' · Weinkeller';
+  document.title = { uebersicht: 'Übersicht', keller: 'Keller', neu: 'Neuer Wein', wein: 'Wein', bearbeiten: 'Bearbeiten', duplizieren: 'Duplizieren', einlagern: 'In den Keller übernehmen', daten: 'Daten & Backup', lagerplan: 'Lagerplan', lagerorte: 'Lager & Regale' }[r.name] + ' · Weinkeller';
   if (r.name === 'keller') renderResults();
   if (['neu', 'bearbeiten', 'duplizieren', 'einlagern'].includes(r.name)) bindForm({ bearbeiten: 'edit', duplizieren: 'dup', einlagern: 'adopt', neu: 'new' }[r.name]);
   if (render.lastRoute !== location.hash) { window.scrollTo(0, 0); const af = $('[autofocus]', m); if (af && matchMedia('(min-width: 700px)').matches) af.focus(); else m.focus({ preventScroll: true }); }
@@ -2456,8 +2916,75 @@ function bindForm(mode) {
     $('#est-hint').innerHTML = has ? 'Eigene Angaben haben Vorrang. Fehlende Werte werden geschätzt.' :
       `Ohne Angabe nutzt die App eine <strong>Schätzung</strong>: ${e.drinkFrom}–${e.drinkUntil}${e.peak ? `, Höhepunkt ${e.peak}` : ''} (${esc(e.basis.slice(-1)[0] || '')}). <button type="button" class="sm" data-act="est-fill">Übernehmen</button>`;
   };
+  /* ---- Schnell erfassen: erkannte Werte in leere Felder übernehmen ---- */
+  let filling = false;
+  const FIELD = { name: 'w-name', producer: 'w-producer', vintage: 'w-vintage', type: 'w-type', grapes: 'w-grapes', country: 'w-country', region: 'w-region',
+    appellation: 'w-app', classification: 'w-class', abv: 'w-abv', bottleSize: 'w-size' };
+  const status = (html, cls = '') => { $('#q-status').innerHTML = html ? `<div class="banner ${cls || 'info'}" style="margin:.75rem 0 0">${html}</div>` : ''; };
+  const apply = (res, ean) => {
+    const filled = [];
+    filling = true;
+    for (const [k, id] of Object.entries(FIELD)) {
+      let v = res.fields[k]; const el = document.getElementById(id);
+      if (v == null || v === '' || !el || (Array.isArray(v) && !v.length)) continue;
+      if (el.dataset.touched || (el.value && !el.dataset.auto && !(k === 'type' || k === 'bottleSize'))) continue;
+      if (k === 'vintage' && form.nv.checked) continue;
+      if (k === 'grapes') v = v.join(', ');
+      if (k === 'abv') v = fmtNum.format(v);
+      if (k === 'bottleSize') v = String(v);
+      if (el.value === String(v)) continue;
+      el.value = v; el.classList.add('auto'); el.dataset.auto = '1';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      if (el.closest('details') && !['name', 'producer', 'vintage', 'type'].includes(k)) el.closest('details').open = true;
+      filled.push(k);
+    }
+    if (ean) { form.ean.value = ean; }
+    filling = false;
+    updEst(); $('#vivino-search').href = vivinoSearchUrl(readForm(form, w));
+    const own = findOwnMatches(Store.state, { ean: ean || form.ean.value, name: $('#w-name').value, producer: $('#w-producer').value }).filter(x => x.id !== w.id);
+    $('#q-own').innerHTML = own.length ? `<div class="banner warn" style="margin:.75rem 0 0"><div><strong>Diesen Wein hast du schon:</strong> ${own.map(x => `<a href="#/wein/${x.id}">${esc(x.name)} ${esc(UI.vintage(x))}</a> (${x.origin === 'extern' ? 'woanders getrunken' : quantity(x) + ' Fl.'})`).join(', ')}. Für mehr Flaschen dort „Bewegung buchen“ – oder hier als neuen Jahrgang anlegen.</div></div>` : '';
+    return filled;
+  };
+  const report = (res, filled, src) => {
+    if (!filled.length) return status(`Aus ${src} konnte ich nichts Neues übernehmen. ${res.found.length ? 'Die erkannten Werte stehen schon in den Feldern.' : 'Tipp: Foto gerade und nah aufnehmen, ohne Spiegelung – oder den Text mit Live Text/Google Lens kopieren und einfügen.'}`, 'warn');
+    status(`<div><strong>Erkannt:</strong> ${esc(res.found.join(' · '))}. Gelb markierte Felder bitte prüfen.</div>`);
+    const first = document.getElementById(FIELD[filled[0]]); if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  const showRaw = text => { const d = $('#q-raw'); d.classList.toggle('hidden', !text); d.querySelector('pre').textContent = text || ''; };
+  const runLookup = async code => {
+    code = String(code || '').replace(/\D/g, '');
+    if (code.length < 8 || code.length > 14) return status('Bitte eine 8- bis 14-stellige Barcode-Nummer eingeben.', 'warn');
+    $('#q-ean').value = code; form.ean.value = code;
+    status('Suche in Open Food Facts …');
+    try {
+      const p = await lookupBarcode(code);
+      if (!p) { apply({ fields: {}, found: [] }, code); return status(`Barcode ${esc(code)} ist in Open Food Facts nicht eingetragen. Er wird trotzdem beim Wein gespeichert, damit die App ihn später wiedererkennt.`, 'warn'); }
+      const res = offToFields(p); report(res, apply(res, code), 'der Datenbank');
+    } catch (err) { status(esc(err.message), 'err'); }
+  };
+  $('#q-photo') && $('#q-photo').addEventListener('change', async e => {
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    if (!w.photo) { try { w.photo = await resizeImage(file); $('#photo-prev').innerHTML = `<img class="photo" src="${w.photo}" alt="Etikett"><button type="button" class="sm danger" data-act="photo-del">Foto entfernen</button>`; } catch {} }
+    const code = await detectBarcode(file);
+    try {
+      const r = await OCR.read(file, msg => status(esc(msg)));
+      showRaw(r.text);
+      const res = parseLabelText(r.text, r.lines);
+      report(res, apply(res, code), 'dem Foto');
+      if (code) runLookup(code);
+    } catch (err) { status(esc(err.message), 'err'); if (code) runLookup(code); }
+  });
+  $('#q-bc-photo') && $('#q-bc-photo').addEventListener('change', async e => {
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    const code = await detectBarcode(file);
+    if (!code) return status('Kein Barcode erkannt. Bitte näher und gerade fotografieren – oder die Zahl eintippen.', 'warn');
+    runLookup(code);
+  });
+
   form.addEventListener('input', e => {
     const t = e.target;
+    if (!filling && t.classList.contains('auto')) { t.classList.remove('auto'); delete t.dataset.auto; }
+    if (!filling && t.id && Object.values(FIELD).includes(t.id)) t.dataset.touched = '1';
     if (t.name === 'nv') { form.vintage.disabled = t.checked; if (t.checked) form.vintage.value = ''; }
     if (t.name === 'origin') $$('[data-show]', form).forEach(el => el.classList.toggle('hidden', el.dataset.show !== t.value));
     if (t.name === 'wishlist') $$('[name=wishlist]', form).forEach(c => { c.checked = t.checked; });
@@ -2481,6 +3008,16 @@ function bindForm(mode) {
     if (act === 'pl-add') { const last = w.placements.at(-1), l = Store.state.locations[0]; w.placements.push({ id: uuid(), locationId: last ? last.locationId : l.id, zoneId: last ? last.zoneId : l.zones[0].id, row: null, col: null, count: 1, _touched: true }); $('#placements').innerHTML = '<legend>Lagerort</legend>' + placementsEditor(w, mode !== 'edit'); }
     if (act === 'pl-del') { w.placements.splice(+b.dataset.i, 1); $('#placements').innerHTML = '<legend>Lagerort</legend>' + placementsEditor(w, mode !== 'edit'); }
     if (act === 'photo-del') { w.photo = null; $('#photo-prev').innerHTML = ''; }
+    if (act === 'q-paste' || act === 'q-barcode') {
+      const box = $(act === 'q-paste' ? '#q-paste-box' : '#q-barcode-box'), open = box.classList.toggle('hidden') === false;
+      b.setAttribute('aria-expanded', open); if (open) box.querySelector('textarea, input').focus();
+    }
+    if (act === 'q-parse') {
+      const text = $('#q-text').value.trim();
+      if (!text) { status('Bitte zuerst Text einfügen.', 'warn'); return $('#q-text').focus(); }
+      showRaw(''); const res = parseLabelText(text); report(res, apply(res), 'dem Text');
+    }
+    if (act === 'q-lookup') runLookup($('#q-ean').value);
     if (act === 'est-fill') { const e2 = estimateWindow(readForm(form, w)); form.drinkFrom.value = e2.drinkFrom; form.peak.value = e2.peak ?? ''; form.drinkUntil.value = e2.drinkUntil; updEst(); }
   });
   $('#w-photo').addEventListener('change', async e => {
@@ -2577,14 +3114,29 @@ document.addEventListener('click', async e => {
       if (!(await UI.confirm('Wein endgültig löschen?', `„${w.name} ${UI.vintage(w)}“ samt Historie und Notizen wird gelöscht. Tipp: Ausgetrunkene Weine musst du nicht löschen – sie bleiben als Archiv.`, 'Endgültig löschen', true))) return;
       await Store.commit(st => { st.wines = st.wines.filter(x => x.id !== w.id); tomb(st, w.id); }); UI.toast('Wein gelöscht.'); location.hash = '#/keller'; return;
     }
-    case 'loc-add': await Store.commit(st => st.locations.push({ id: uuid(), name: 'Neues Lager', zones: [{ id: uuid(), name: 'Regal 1', rows: 4, cols: 6 }] })); return render();
-    case 'zone-add': await Store.commit(st => { const l = st.locations.find(l => l.id === b.dataset.loc); l.zones.push({ id: uuid(), name: 'Neues Regal', rows: 4, cols: 6 }); l.updatedAt = new Date().toISOString(); }); return render();
+    case 'loc-add': {
+      const id = uuid(), now = new Date().toISOString();
+      await Store.commit(st => st.locations.push({ id, name: 'Neues Lager', updatedAt: now, zones: [{ id: uuid(), name: 'Regal 1', rows: 4, cols: 6, updatedAt: now }] }));
+      render(); const inp = document.getElementById('ln-' + id); if (inp) { inp.focus(); inp.select(); inp.scrollIntoView({ block: 'center' }); }
+      return UI.toast('Neues Lager angelegt – gib ihm einen Namen.');
+    }
+    case 'zone-step': {
+      const [locId, zoneId] = b.dataset.zone.split('|'), k = b.dataset.k, z = findZone(s, locId, zoneId), n = z[k] + Number(b.dataset.d);
+      if (n < 1 || n > 50) return UI.toast('Erlaubt sind 1 bis 50.');
+      const blocked = s.wines.some(w => quantity(w) > 0 && w.placements.some(p => p.count > 0 && p.locationId === locId && p.zoneId === zoneId && (k === 'rows' ? p.row > n : p.col > n)));
+      if (blocked) return UI.toast(`Verkleinern nicht möglich: Es liegen Flaschen außerhalb von ${n} ${k === 'rows' ? 'Reihen' : 'Fächern'}.`);
+      await Store.commit(st => { const zz = findZone(st, locId, zoneId); zz[k] = n; zz.updatedAt = new Date().toISOString(); (zz.ts ||= {})[k] = zz.updatedAt; });
+      return render();
+    }
+    case 'zone-add': await Store.commit(st => { const l = st.locations.find(l => l.id === b.dataset.loc); l.zones.push({ id: uuid(), name: 'Neues Regal', rows: 4, cols: 6, updatedAt: new Date().toISOString() }); }); return render();
     case 'loc-del': case 'zone-del': {
       const [locId, zoneId] = (b.dataset.zone || b.dataset.loc).split('|');
       const used = s.wines.some(w => w.placements.some(p => p.count > 0 && p.locationId === locId && (!zoneId || p.zoneId === zoneId)));
       if (used) return UI.toast('Hier liegen noch Flaschen. Bitte zuerst umlagern.');
       if (act === 'loc-del' && s.locations.length <= 1) return UI.toast('Mindestens ein Lager wird benötigt.');
       if (act === 'zone-del' && s.locations.find(l => l.id === locId).zones.length <= 1) return UI.toast('Jedes Lager braucht mindestens ein Regal/Zone.');
+      const nm = act === 'loc-del' ? findLocation(s, locId).name : findZone(s, locId, zoneId).name;
+      if (!(await UI.confirm(act === 'loc-del' ? 'Lager löschen?' : 'Regal entfernen?', `„${nm}“ wird${Sync.on ? ' auf allen Geräten' : ''} entfernt.`, 'Löschen', true))) return;
       await Store.commit(st => {
         if (act === 'loc-del') { st.locations = st.locations.filter(l => l.id !== locId); tomb(st, locId); }
         else { const l = st.locations.find(l => l.id === locId); l.zones = l.zones.filter(z => z.id !== zoneId); tomb(st, zoneId); l.updatedAt = new Date().toISOString(); }
@@ -2624,7 +3176,8 @@ document.addEventListener('change', async e => {
       const used = s.wines.some(w => quantity(w) > 0 && w.placements.some(p => p.count > 0 && p.locationId === locId && p.zoneId === zoneId && (k === 'rows' ? p.row > n : p.col > n)));
       if (used) { UI.toast(`Verkleinern nicht möglich: Es liegen Flaschen außerhalb von ${n} ${k === 'rows' ? 'Reihen' : 'Fächern'}.`); return render(); }
     }
-    await Store.commit(st => { const zz = findZone(st, locId, zoneId); zz[k] = k === 'name' ? t.value.trim() : toInt(t.value); findLocation(st, locId).updatedAt = new Date().toISOString(); });
+    await Store.commit(st => { const zz = findZone(st, locId, zoneId); zz[k] = k === 'name' ? t.value.trim() : toInt(t.value); zz.updatedAt = new Date().toISOString(); (zz.ts ||= {})[k] = zz.updatedAt; });
+    if (route().name === 'lagerorte' && k !== 'name') render();
     return UI.toast('Gespeichert.');
   }
   if (t.id === 'imp-json' && t.files[0]) {
